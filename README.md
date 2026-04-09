@@ -158,20 +158,17 @@ The 5-hour session resets often, but the **7-day window is the real limit**. It 
 brew install --cask swiftbar
 brew install jq
 
-# 2. Get the plugin
-git clone https://github.com/haomingkoo/claude-code-monitor.git ~/SwiftBarPlugins
+# 2. Get the plugin (recommended)
+mkdir -p ~/SwiftBarPlugins
+curl -o ~/SwiftBarPlugins/claude-code-monitor.2m.sh \
+  https://raw.githubusercontent.com/haomingkoo/claude-code-monitor/main/claude-code-monitor.2m.sh
+chmod +x ~/SwiftBarPlugins/claude-code-monitor.2m.sh
 
 # 3. Open SwiftBar → set plugin folder to ~/SwiftBarPlugins
 open -a SwiftBar
 ```
 
-Or just download the script directly:
-
-```bash
-curl -o ~/SwiftBarPlugins/claude-code-monitor.2m.sh \
-  https://raw.githubusercontent.com/haomingkoo/claude-code-monitor/main/claude-code-monitor.2m.sh
-chmod +x ~/SwiftBarPlugins/claude-code-monitor.2m.sh
-```
+> **If you `git clone` instead:** The repo includes Windows files in a `windows/` subfolder. SwiftBar may try to run `windows/launch-monitor.bat` and show errors — this is harmless but noisy. The `.swiftbarignore` file is included to suppress this. If you still see errors, the `curl` method above avoids the issue entirely.
 
 You should see **🟢 XX% · 7d:XX%** in your menu bar. Everything else is created automatically.
 

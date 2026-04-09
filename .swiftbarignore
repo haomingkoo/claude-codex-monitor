@@ -4,3 +4,7 @@ LICENSE
 .gitignore
 .swiftbarignore
 windows/
+assets/
+*.bat
+*.vbs
+*.ps1
