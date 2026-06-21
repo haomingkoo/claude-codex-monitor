@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # <xbar.title>Claude Code Usage</xbar.title>
-# <xbar.version>v10.0</xbar.version>
+# <xbar.version>v11.0</xbar.version>
 # <xbar.author>koohaoming</xbar.author>
-# <xbar.desc>Shows Claude Code remaining rate limits via OAuth endpoint</xbar.desc>
+# <xbar.desc>Shows Claude Code remaining rate limits (5h, 7-day, per-model sub-limits, extra usage) via the OAuth usage endpoint</xbar.desc>
 
 # ============================================================
 # CONFIG
@@ -168,6 +168,13 @@ for interval in 10 30 60 120 off; do
   fi
 done
 
+# Force-refresh helper — drops a sentinel so the next run skips the cache TTL and hits the API
+f="$SCRIPT_DIR/force-refresh.sh"
+if [ ! -f "$f" ]; then
+  printf '#!/bin/bash\ntouch "$HOME/.cache/claude-usage/force_refresh"\n' > "$f"
+  chmod +x "$f"
+fi
+
 # ============================================================
 # TRANSLATIONS
 # ============================================================
@@ -306,6 +313,11 @@ case "$LANGUAGE" in
     ;;
 esac
 
+# Labels for the per-model sub-limit and extra-usage rows (English fallback across all languages)
+: "${L_WINDOW_7D_SONNET:=7-Day Sonnet}"
+: "${L_EXTRA_USAGE:=Extra Usage}"
+: "${L_EXTRA_OFF:=off}"
+
 # ============================================================
 # LOGGING
 # ============================================================
@@ -362,7 +374,16 @@ fi
 # ============================================================
 USE_CACHE=false
 
-if [ -f "$CACHE_FILE" ]; then
+# Force refresh: a sentinel dropped by the Refresh menu item bypasses the cache TTL for one run
+FORCE_REFRESH_FILE="$CACHE_DIR/force_refresh"
+FORCE_REFRESH=false
+if [ -f "$FORCE_REFRESH_FILE" ]; then
+  FORCE_REFRESH=true
+  rm -f "$FORCE_REFRESH_FILE"
+  log "INFO" "Force refresh requested — bypassing cache"
+fi
+
+if [ "$FORCE_REFRESH" = false ] && [ -f "$CACHE_FILE" ]; then
   cache_age=$(( $(date +%s) - $(stat -f %m "$CACHE_FILE") ))
   if [ "$cache_age" -lt "$CACHE_TTL" ]; then
     USE_CACHE=true
@@ -441,6 +462,15 @@ seven_day_used=$(echo "$USAGE" | $JQ -r 'if .seven_day then .seven_day.utilizati
 seven_day_reset=$(echo "$USAGE" | $JQ -r 'if .seven_day then .seven_day.resets_at // empty else empty end')
 opus_used=$(echo "$USAGE" | $JQ -r 'if .seven_day_opus then .seven_day_opus.utilization // empty else empty end')
 opus_reset=$(echo "$USAGE" | $JQ -r 'if .seven_day_opus then .seven_day_opus.resets_at // empty else empty end')
+sonnet_used=$(echo "$USAGE" | $JQ -r 'if .seven_day_sonnet then .seven_day_sonnet.utilization // empty else empty end')
+sonnet_reset=$(echo "$USAGE" | $JQ -r 'if .seven_day_sonnet then .seven_day_sonnet.resets_at // empty else empty end')
+
+# Extra Usage (pay-as-you-go credits) — separate from the rate-limit windows
+extra_enabled=$(echo "$USAGE" | $JQ -r '.spend.enabled // false')
+extra_used_minor=$(echo "$USAGE" | $JQ -r '.spend.used.amount_minor // empty')
+extra_limit_minor=$(echo "$USAGE" | $JQ -r '.spend.limit.amount_minor // empty')
+extra_exponent=$(echo "$USAGE" | $JQ -r '.spend.limit.exponent // 2')
+extra_currency=$(echo "$USAGE" | $JQ -r '.spend.limit.currency // empty')
 
 calc_remaining() {
   echo "scale=1; 100 - $1" | bc
@@ -457,6 +487,13 @@ else
 fi
 
 log "INFO" "5h: ${five_hr_left}% left | 7d: ${seven_day_left:-N/A}% left | source: $FETCH_STATUS"
+
+# Detect if the 5-hour window reset while we're stuck on stale data
+five_hr_stale_expired=false
+if echo "$FETCH_STATUS" | grep -q "stale" && [ -n "$five_hr_reset" ] && [ "$five_hr_reset" != "null" ]; then
+  _fh_e=$(parse_reset_epoch "$five_hr_reset")
+  [ -n "$_fh_e" ] && [ "$_fh_e" -lt "$(date +%s)" ] && five_hr_stale_expired=true
+fi
 
 # ============================================================
 # THEME
@@ -899,12 +936,14 @@ S=14  # base font size
 
 # Menu bar
 bar_icon=$(status_icon "$five_hr_left_int")
+five_hr_bar_label="${five_hr_left_int}%"
+[ "$five_hr_stale_expired" = true ] && five_hr_bar_label="~0%"
 if [ "$HAS_SEVEN_DAY" = true ]; then
   seven_day_left_int=${seven_day_left%.*}
   seven_color=$(color_for_remaining "$seven_day_left")
-  echo "${bar_icon} ${five_hr_left_int}% · 7d:${seven_day_left_int}% | size=13"
+  echo "${bar_icon} ${five_hr_bar_label} · 7d:${seven_day_left_int}% | size=13"
 else
-  echo "${bar_icon} ${five_hr_left_int}% · 7d:N/A | size=13"
+  echo "${bar_icon} ${five_hr_bar_label} · 7d:N/A | size=13"
 fi
 echo "---"
 
@@ -947,6 +986,10 @@ render_section() {
     echo "$(fmt_refills "$reset_str") (${local_time}) | size=$S $(c "$TEXT_SECONDARY") $NOP"
   elif [ -n "$reset_str" ]; then
     echo "$(fmt_refills "$reset_str") | size=$S $(c "$TEXT_SECONDARY") $NOP"
+  elif [ -n "$reset_ts" ] && [ "$reset_ts" != "null" ]; then
+    local _re=$(parse_reset_epoch "$reset_ts")
+    local _now=$(date +%s)
+    [ -n "$_re" ] && [ "$_re" -lt "$_now" ] && echo "Window reset — awaiting fresh data | size=$S $(c "$TEXT_MUTED") $NOP"
   fi
 
   # Pace indicator + burnout projection
@@ -980,10 +1023,30 @@ if [ -n "$opus_used" ] && [ "$opus_used" != "null" ]; then
   render_section "$L_WINDOW_7D_OPUS" "$opus_left" "$opus_color" "$opus_reset" "604800" "$opus_used" "true"
 fi
 
+if [ -n "$sonnet_used" ] && [ "$sonnet_used" != "null" ]; then
+  echo "---"
+  sonnet_left=$(calc_remaining "$sonnet_used")
+  sonnet_color=$(color_for_remaining "$sonnet_left")
+  render_section "$L_WINDOW_7D_SONNET" "$sonnet_left" "$sonnet_color" "$sonnet_reset" "604800" "$sonnet_used" "true"
+fi
+
+# Extra Usage (pay-as-you-go credits) — show spend vs limit when enabled, otherwise mark it off
+if [ -n "$extra_limit_minor" ]; then
+  echo "---"
+  NOP="bash='true' terminal=false"
+  if [ "$extra_enabled" = "true" ]; then
+    extra_used_disp=$(awk -v m="${extra_used_minor:-0}" -v e="${extra_exponent:-2}" 'BEGIN { printf "%.2f", m/(10^e) }')
+    extra_limit_disp=$(awk -v m="$extra_limit_minor" -v e="${extra_exponent:-2}" 'BEGIN { printf "%.2f", m/(10^e) }')
+    echo "💳  ${L_EXTRA_USAGE}: ${extra_used_disp} / ${extra_limit_disp} ${extra_currency} | size=$S $(c "$TEXT_PRIMARY") $NOP"
+  else
+    echo "💳  ${L_EXTRA_USAGE}: ${L_EXTRA_OFF} | size=$S $(c "$TEXT_MUTED") $NOP"
+  fi
+fi
+
 echo "---"
 echo "$L_SOURCE: ${FETCH_STATUS} | size=$S $(c "$TEXT_SECONDARY") bash='true' terminal=false"
 echo "---"
-echo "$L_REFRESH | refresh=true $(c "$TEXT_SECONDARY") size=$S"
+echo "$L_REFRESH | bash='$SCRIPT_DIR/force-refresh.sh' terminal=false refresh=true $(c "$TEXT_SECONDARY") size=$S"
 echo "$L_OPEN_LOG | bash='open' param1='$LOG_FILE' terminal=false $(c "$TEXT_SECONDARY") size=$S"
 echo "---"
 # Refresh rate — flyout submenu

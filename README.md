@@ -4,7 +4,7 @@ Know exactly how much Claude Code you have left — right from your menu bar.
 
 A lightweight widget that tracks your **remaining** rate limits in real time, tells you when you're burning too fast, and alerts you before you run out. Available for **macOS** (SwiftBar) and **Windows** (system tray).
 
-**New in v10.0:** Get alerts on your phone and smart "tokens refreshing soon" reminders — [see below](#-phone-alerts-optional--macos).
+**New in v11.0:** Per-model sub-limits (Sonnet and Opus), an Extra Usage row for pay-as-you-go credits, and a Refresh button that forces a live pull instead of re-showing the cache.
 
 ---
 
@@ -31,6 +31,13 @@ A lightweight widget that tracks your **remaining** rate limits in real time, te
   Pace: 0.7x
   Burns out in ~6d 11h
   ---------------------------------
+  7-Day Sonnet
+  ||||||||||||||||||||
+  100% remaining
+  Refills in 4d 12h (Mar 16)
+  ---------------------------------
+  Extra Usage: off
+  ---------------------------------
   Source: live
   ---------------------------------
   Refresh
@@ -41,6 +48,8 @@ A lightweight widget that tracks your **remaining** rate limits in real time, te
   ⏰ Remind Before Reset            >
   📱 Phone Alerts (ntfy)            >
 ```
+
+Per-model rows (Sonnet, Opus) show up only when your plan reports them. The Extra Usage row shows your pay-as-you-go spend against its cap, or "off" when you have no extra-usage credits enabled.
 
 **Windows (System Tray)** — two icons rotate in the tray (donut ring for 5h, bar for 7d). Click for the full dropdown:
 
@@ -71,7 +80,7 @@ At a glance: 🟢 >50% left · 🟡 20–50% left · 🔴 <20% left
 
 ## Features
 
-**See what's left** — 5-hour session, 7-day window, and Opus-specific quota (when applicable).
+**See what's left** — 5-hour session, 7-day window, per-model sub-limits (Sonnet and Opus, when your plan reports them), and your pay-as-you-go Extra Usage balance.
 
 **Know when it resets** — countdown timer + local time, e.g., "Refills in 1h 49m (4:00 PM)". No timezone math needed.
 
@@ -226,6 +235,8 @@ NOTIFY_THRESHOLDS="50 25 10"
 6. Sends alerts when thresholds are crossed
 7. Falls back to cached data if the API is unavailable
 
+Clicking **Refresh** skips the cache and pulls fresh numbers right away. The background runs (every 2 minutes by default) still use the cache so they don't trip the rate limit. When the API is rate-limited and the cached 5-hour window has already reset, the menu bar shows `~0%` and the dropdown says the window reset, so you don't mistake stale data for a real reading.
+
 ---
 
 ## Security
@@ -269,6 +280,7 @@ NOTIFY_THRESHOLDS="50 25 10"
 
 | Version | What changed |
 |---------|-------------|
+| **v11.0** | Per-model sub-limits (Sonnet, Opus). Extra Usage row for pay-as-you-go credits. Refresh now forces a live pull. Clearer staleness: `~0%` and a "window reset" note when rate-limited past a reset. |
 | **v10.0** | Phone alerts via ntfy (optional, no API keys). Smart reset reminders that only nudge when you're idle. Configurable from dropdown menu. |
 | **v9.2** | Auto-create helper scripts. Add MIT LICENSE. Fix jq detection. |
 | **v9.0** | Fix rate limit death spiral. Configurable refresh rate. Dynamic cache TTL. |
