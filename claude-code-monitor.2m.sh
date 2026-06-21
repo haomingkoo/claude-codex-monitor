@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # <xbar.title>Claude Code Usage</xbar.title>
-# <xbar.version>v11.0</xbar.version>
+# <xbar.version>v12.0</xbar.version>
 # <xbar.author>koohaoming</xbar.author>
-# <xbar.desc>Shows Claude Code remaining rate limits (5h, 7-day, per-model sub-limits, extra usage) via the OAuth usage endpoint</xbar.desc>
+# <xbar.desc>Menu-bar usage for Claude Code and OpenAI Codex — rotates between providers; shows 5h, weekly, per-model sub-limits, and credits. Works with either or both.</xbar.desc>
 
 # ============================================================
 # CONFIG
@@ -12,6 +12,13 @@ CACHE_DIR="$HOME/.cache/claude-usage"
 CACHE_FILE="$CACHE_DIR/usage.json"
 LOG_FILE="$CACHE_DIR/plugin.log"
 NOTIFY_STATE="$CACHE_DIR/notify_state"
+
+# Codex (OpenAI) — optional second provider. Auto-detected; absent = Claude-only, unchanged.
+CODEX_AUTH="$HOME/.codex/auth.json"
+CODEX_CACHE="$CACHE_DIR/codex_usage.json"
+CODEX_USAGE_URL="https://chatgpt.com/backend-api/wham/usage"
+CODEX_TOKEN_URL="https://auth.openai.com/oauth/token"
+CODEX_CLIENT_ID="app_EMoamEEZ73f0CkXaXp7hrann"
 
 # Language: saved in config file, changeable from dropdown menu
 LANG_FILE="$CACHE_DIR/language"
@@ -349,32 +356,38 @@ else
 fi
 
 # ============================================================
-# AUTH
+# AUTH — both providers optional; show whatever is logged in
 # ============================================================
+HAS_CODEX=false
+[ -f "$CODEX_AUTH" ] && HAS_CODEX=true
+
+# Claude auth (Keychain). Missing auth is only fatal when Codex is also absent.
+CLAUDE_OK=true
 CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+TOKEN=""
 if [ -z "$CREDS" ]; then
+  CLAUDE_OK=false
+  log "WARN" "No Claude credentials in Keychain"
+else
+  TOKEN=$(echo "$CREDS" | $JQ -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+  if [ -z "$TOKEN" ]; then
+    CLAUDE_OK=false
+    log "ERROR" "Failed to parse Claude accessToken"
+  fi
+fi
+
+# Nothing to show at all → surface the auth error and stop
+if [ "$CLAUDE_OK" = false ] && [ "$HAS_CODEX" = false ]; then
   echo "CC: no auth"
   echo "---"
   echo "$L_NO_AUTH | size=13"
-  log "WARN" "No credentials in Keychain"
-  exit 0
-fi
-
-TOKEN=$(echo "$CREDS" | $JQ -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
-if [ -z "$TOKEN" ]; then
-  echo "CC: no token"
-  echo "---"
-  echo "$L_NO_TOKEN | size=13"
-  log "ERROR" "Failed to parse accessToken from credentials"
   exit 0
 fi
 
 # ============================================================
 # FETCH WITH CACHE
 # ============================================================
-USE_CACHE=false
-
-# Force refresh: a sentinel dropped by the Refresh menu item bypasses the cache TTL for one run
+# Force-refresh sentinel — shared by both providers, detected once per run
 FORCE_REFRESH_FILE="$CACHE_DIR/force_refresh"
 FORCE_REFRESH=false
 if [ -f "$FORCE_REFRESH_FILE" ]; then
@@ -383,6 +396,12 @@ if [ -f "$FORCE_REFRESH_FILE" ]; then
   log "INFO" "Force refresh requested — bypassing cache"
 fi
 
+# Remaining-percent helper (used by both Claude and Codex)
+calc_remaining() { echo "scale=1; 100 - $1" | bc; }
+
+# ----- Claude usage (only when logged in) -----
+if [ "$CLAUDE_OK" = true ]; then
+USE_CACHE=false
 if [ "$FORCE_REFRESH" = false ] && [ -f "$CACHE_FILE" ]; then
   cache_age=$(( $(date +%s) - $(stat -f %m "$CACHE_FILE") ))
   if [ "$cache_age" -lt "$CACHE_TTL" ]; then
@@ -404,6 +423,7 @@ else
 
   if [ "$HTTP_CODE" = "200" ]; then
     mv "$CACHE_FILE.tmp" "$CACHE_FILE"
+    chmod 600 "$CACHE_FILE" 2>/dev/null  # usage data is private — owner-only
     USAGE=$(cat "$CACHE_FILE")
     FETCH_STATUS="live"
     log "INFO" "API call success (HTTP $HTTP_CODE)"
@@ -414,13 +434,15 @@ else
       touch "$CACHE_FILE"  # refresh mtime so CACHE_TTL prevents further API calls
       USAGE=$(cat "$CACHE_FILE")
       FETCH_STATUS="rate limited — showing stale data"
-    else
+    elif [ "$HAS_CODEX" = false ]; then
       echo "CC: 429"
       echo "---"
       echo "$L_RATE_LIMITED | size=13 color=#CC7700"
       echo "---"
-      echo "$L_REFRESH | refresh=true size=13"
+      echo "$L_REFRESH | bash='$SCRIPT_DIR/force-refresh.sh' terminal=false refresh=true size=13"
       exit 0
+    else
+      CLAUDE_OK=false  # Codex is present — skip Claude, show Codex
     fi
   else
     log "ERROR" "API call failed (HTTP $HTTP_CODE)"
@@ -429,33 +451,42 @@ else
       touch "$CACHE_FILE"  # refresh mtime so CACHE_TTL prevents further API calls
       USAGE=$(cat "$CACHE_FILE")
       FETCH_STATUS="error (HTTP $HTTP_CODE) — showing stale data"
-    else
+    elif [ "$HAS_CODEX" = false ]; then
       echo "CC: error"
       echo "---"
       echo "$L_API_ERROR (HTTP $HTTP_CODE) | size=13 color=#CC0000"
       echo "---"
       echo "$L_OPEN_LOG | bash='open' param1='$LOG_FILE' terminal=false size=13"
-      echo "$L_REFRESH | refresh=true size=13"
+      echo "$L_REFRESH | bash='$SCRIPT_DIR/force-refresh.sh' terminal=false refresh=true size=13"
       exit 0
+    else
+      CLAUDE_OK=false
     fi
   fi
 fi
+fi  # end Claude fetch gate
 
-# Validate JSON — API sometimes returns {"five_hour": null} temporarily
+# Validate + parse Claude data only if the fetch produced usable JSON
+if [ "$CLAUDE_OK" = true ]; then
 if ! echo "$USAGE" | $JQ -e '.five_hour.utilization // empty' &>/dev/null; then
-  log "WARN" "API returned null data — will retry next run"
-  echo "CC: waiting"
-  echo "---"
-  echo "$L_NOT_AVAIL | size=13 $(c "$TEXT_MUTED")"
-  echo "---"
-  echo "$L_OPEN_LOG | bash='open' param1='$LOG_FILE' terminal=false size=13"
-  echo "$L_REFRESH | refresh=true size=13"
-  exit 0
+  log "WARN" "Claude API returned null data — will retry next run"
+  if [ "$HAS_CODEX" = false ]; then
+    echo "CC: waiting"
+    echo "---"
+    echo "$L_NOT_AVAIL | size=13"
+    echo "---"
+    echo "$L_OPEN_LOG | bash='open' param1='$LOG_FILE' terminal=false size=13"
+    echo "$L_REFRESH | bash='$SCRIPT_DIR/force-refresh.sh' terminal=false refresh=true size=13"
+    exit 0
+  fi
+  CLAUDE_OK=false
+fi
 fi
 
 # ============================================================
-# PARSE
+# PARSE (Claude)
 # ============================================================
+if [ "$CLAUDE_OK" = true ]; then
 five_hr_used=$(echo "$USAGE" | $JQ -r 'if .five_hour then .five_hour.utilization // 0 else empty end')
 five_hr_reset=$(echo "$USAGE" | $JQ -r 'if .five_hour then .five_hour.resets_at // empty else empty end')
 seven_day_used=$(echo "$USAGE" | $JQ -r 'if .seven_day then .seven_day.utilization // 0 else empty end')
@@ -472,10 +503,6 @@ extra_limit_minor=$(echo "$USAGE" | $JQ -r '.spend.limit.amount_minor // empty')
 extra_exponent=$(echo "$USAGE" | $JQ -r '.spend.limit.exponent // 2')
 extra_currency=$(echo "$USAGE" | $JQ -r '.spend.limit.currency // empty')
 
-calc_remaining() {
-  echo "scale=1; 100 - $1" | bc
-}
-
 five_hr_left=$(calc_remaining "${five_hr_used:-0}")
 
 HAS_SEVEN_DAY=true
@@ -487,13 +514,7 @@ else
 fi
 
 log "INFO" "5h: ${five_hr_left}% left | 7d: ${seven_day_left:-N/A}% left | source: $FETCH_STATUS"
-
-# Detect if the 5-hour window reset while we're stuck on stale data
-five_hr_stale_expired=false
-if echo "$FETCH_STATUS" | grep -q "stale" && [ -n "$five_hr_reset" ] && [ "$five_hr_reset" != "null" ]; then
-  _fh_e=$(parse_reset_epoch "$five_hr_reset")
-  [ -n "$_fh_e" ] && [ "$_fh_e" -lt "$(date +%s)" ] && five_hr_stale_expired=true
-fi
+fi  # end Claude parse gate
 
 # ============================================================
 # THEME
@@ -926,30 +947,154 @@ ntfy_status_push() {
 }
 
 # ============================================================
+# CODEX FETCH + PARSE (optional second provider; runs after helpers exist)
+# Security: tokens are never logged or echoed; auth.json + caches stay mode 600.
+# ============================================================
+CODEX_OK=false
+CODEX_STATUS=""
+if [ "$HAS_CODEX" = true ]; then
+  cx_access=$($JQ -r '.tokens.access_token // empty' "$CODEX_AUTH" 2>/dev/null)
+  cx_acct=$($JQ -r '.tokens.account_id // empty' "$CODEX_AUTH" 2>/dev/null)
+
+  cx_use_cache=false
+  if [ "$FORCE_REFRESH" = false ] && [ -f "$CODEX_CACHE" ]; then
+    cx_age=$(( $(date +%s) - $(stat -f %m "$CODEX_CACHE") ))
+    [ "$cx_age" -lt "$CACHE_TTL" ] && cx_use_cache=true
+  fi
+
+  if [ "$cx_use_cache" = true ]; then
+    CODEX_USAGE=$(cat "$CODEX_CACHE")
+    CODEX_STATUS="cached (${cx_age}s ago)"
+    CODEX_OK=true
+  elif [ -n "$cx_access" ]; then
+    cx_code=$(curl -s -o "$CODEX_CACHE.tmp" -w "%{http_code}" --max-time 10 \
+      -H "Authorization: Bearer $cx_access" \
+      -H "ChatGPT-Account-Id: $cx_acct" \
+      -H "User-Agent: codex_cli_rs" \
+      -H "originator: codex_cli_rs" \
+      -H "Accept: application/json" \
+      "$CODEX_USAGE_URL" 2>/dev/null)
+
+    # Token expired → refresh via refresh_token, write back to auth.json (600), retry once
+    if [ "$cx_code" = "401" ]; then
+      cx_refresh=$($JQ -r '.tokens.refresh_token // empty' "$CODEX_AUTH" 2>/dev/null)
+      if [ -n "$cx_refresh" ]; then
+        log "INFO" "Codex token expired — refreshing"
+        cx_new=$(curl -s --max-time 10 -X POST "$CODEX_TOKEN_URL" \
+          -H "Content-Type: application/json" \
+          -d "{\"client_id\":\"$CODEX_CLIENT_ID\",\"grant_type\":\"refresh_token\",\"refresh_token\":\"$cx_refresh\"}" 2>/dev/null)
+        cx_new_access=$(echo "$cx_new" | $JQ -r '.access_token // empty' 2>/dev/null)
+        if [ -n "$cx_new_access" ]; then
+          cx_new_id=$(echo "$cx_new" | $JQ -r '.id_token // empty' 2>/dev/null)
+          cx_new_refresh=$(echo "$cx_new" | $JQ -r '.refresh_token // empty' 2>/dev/null)
+          cx_tmp_auth="$CODEX_AUTH.tmp.$$"
+          $JQ --arg a "$cx_new_access" --arg i "$cx_new_id" --arg r "$cx_new_refresh" \
+            '.tokens.access_token=$a
+             | (if $i!="" then .tokens.id_token=$i else . end)
+             | (if $r!="" then .tokens.refresh_token=$r else . end)
+             | .last_refresh=(now|todate)' \
+            "$CODEX_AUTH" > "$cx_tmp_auth" 2>/dev/null
+          if [ -s "$cx_tmp_auth" ] && $JQ -e . "$cx_tmp_auth" >/dev/null 2>&1; then
+            chmod 600 "$cx_tmp_auth" 2>/dev/null
+            mv "$cx_tmp_auth" "$CODEX_AUTH"
+            cx_access="$cx_new_access"
+            cx_code=$(curl -s -o "$CODEX_CACHE.tmp" -w "%{http_code}" --max-time 10 \
+              -H "Authorization: Bearer $cx_access" \
+              -H "ChatGPT-Account-Id: $cx_acct" \
+              -H "User-Agent: codex_cli_rs" -H "originator: codex_cli_rs" -H "Accept: application/json" \
+              "$CODEX_USAGE_URL" 2>/dev/null)
+          else
+            rm -f "$cx_tmp_auth"
+            log "ERROR" "Codex token refresh produced invalid auth.json — left untouched"
+          fi
+        fi
+      fi
+    fi
+
+    if [ "$cx_code" = "200" ]; then
+      mv "$CODEX_CACHE.tmp" "$CODEX_CACHE"
+      chmod 600 "$CODEX_CACHE" 2>/dev/null
+      CODEX_USAGE=$(cat "$CODEX_CACHE")
+      CODEX_STATUS="live"
+      CODEX_OK=true
+    else
+      rm -f "$CODEX_CACHE.tmp"
+      if [ -f "$CODEX_CACHE" ]; then
+        CODEX_USAGE=$(cat "$CODEX_CACHE")
+        CODEX_STATUS="stale (HTTP $cx_code)"
+        CODEX_OK=true
+      fi
+      log "WARN" "Codex usage fetch failed (HTTP $cx_code)"
+    fi
+  fi
+
+  if [ "$CODEX_OK" = true ]; then
+    cx_5h_used=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.primary_window.used_percent // empty')
+    cx_5h_reset=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.primary_window.reset_at // empty')
+    cx_wk_used=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.secondary_window.used_percent // empty')
+    cx_wk_reset=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.secondary_window.reset_at // empty')
+    cx_plan=$(echo "$CODEX_USAGE" | $JQ -r '.plan_type // "codex"')
+    cx_credits_has=$(echo "$CODEX_USAGE" | $JQ -r '.credits.has_credits // empty')
+    cx_credits_bal=$(echo "$CODEX_USAGE" | $JQ -r '.credits.balance // empty')
+    cx_credits_unlimited=$(echo "$CODEX_USAGE" | $JQ -r '.credits.unlimited // empty')
+    if [ -z "$cx_5h_used" ]; then
+      CODEX_OK=false  # unexpected shape
+      log "WARN" "Codex usage JSON missing rate_limit fields"
+    else
+      # epoch reset_at -> ISO so render_section's time helpers work
+      cx_5h_iso=$(date -u -r "${cx_5h_reset:-0}" "+%Y-%m-%dT%H:%M:%S+00:00" 2>/dev/null)
+      cx_wk_iso=$(date -u -r "${cx_wk_reset:-0}" "+%Y-%m-%dT%H:%M:%S+00:00" 2>/dev/null)
+    fi
+  fi
+fi
+
+# ============================================================
 # RENDER
 # ============================================================
-five_hr_left_int=${five_hr_left%.*}
-
-five_color=$(color_for_remaining "$five_hr_left")
-
 S=14  # base font size
 
-# Menu bar
-bar_icon=$(status_icon "$five_hr_left_int")
-five_hr_bar_label="${five_hr_left_int}%"
-[ "$five_hr_stale_expired" = true ] && five_hr_bar_label="~0%"
-if [ "$HAS_SEVEN_DAY" = true ]; then
-  seven_day_left_int=${seven_day_left%.*}
-  seven_color=$(color_for_remaining "$seven_day_left")
-  echo "${bar_icon} ${five_hr_bar_label} · 7d:${seven_day_left_int}% | size=13"
-else
-  echo "${bar_icon} ${five_hr_bar_label} · 7d:N/A | size=13"
+# --- Claude menu-bar bits ---
+if [ "$CLAUDE_OK" = true ]; then
+  five_hr_left_int=${five_hr_left%.*}
+  five_color=$(color_for_remaining "$five_hr_left")
+  # Did the 5h window reset while we're stuck on stale (rate-limited) data?
+  five_hr_stale_expired=false
+  if echo "$FETCH_STATUS" | grep -q "stale" && [ -n "$five_hr_reset" ] && [ "$five_hr_reset" != "null" ]; then
+    _fh_e=$(parse_reset_epoch "$five_hr_reset")
+    [ -n "$_fh_e" ] && [ "$_fh_e" -lt "$(date +%s)" ] && five_hr_stale_expired=true
+  fi
+  five_hr_bar_label="${five_hr_left_int}%"
+  [ "$five_hr_stale_expired" = true ] && five_hr_bar_label="~0%"
+  [ "$HAS_SEVEN_DAY" = true ] && seven_color=$(color_for_remaining "$seven_day_left")
 fi
-echo "---"
 
-# Header
-SUB_TYPE=$(echo "$CREDS" | $JQ -r '.claudeAiOauth.subscriptionType // "unknown"' 2>/dev/null)
-echo "Claude Code (${SUB_TYPE}) | size=$S $(c "$TEXT_PRIMARY") bash='true' terminal=false"
+# --- Codex menu-bar bits ---
+if [ "$CODEX_OK" = true ]; then
+  cx_5h_left=$(calc_remaining "${cx_5h_used:-0}"); cx_5h_left_int=${cx_5h_left%.*}
+  cx_wk_left=$(calc_remaining "${cx_wk_used:-0}"); cx_wk_left_int=${cx_wk_left%.*}
+fi
+
+# --- Menu bar: one line per available provider; SwiftBar rotates them ---
+bar_emitted=0
+if [ "$CLAUDE_OK" = true ]; then
+  ci=$(status_icon "$five_hr_left_int")
+  if [ "$HAS_SEVEN_DAY" = true ]; then
+    echo "${ci} CC ${five_hr_bar_label}·7d:${seven_day_left%.*}% | size=13"
+  else
+    echo "${ci} CC ${five_hr_bar_label}·7d:N/A | size=13"
+  fi
+  bar_emitted=1
+fi
+if [ "$CODEX_OK" = true ]; then
+  cx_min=$cx_5h_left_int
+  [ "$cx_wk_left_int" -lt "$cx_min" ] 2>/dev/null && cx_min=$cx_wk_left_int
+  cxi=$(status_icon "$cx_min")
+  echo "${cxi} CX 5h:${cx_5h_left_int}%·wk:${cx_wk_left_int}% | size=13"
+  bar_emitted=1
+fi
+if [ "$bar_emitted" = 0 ]; then
+  echo "CC: unavailable | size=13 color=#CC0000"
+fi
 echo "---"
 
 # Section renderer
@@ -1007,44 +1152,65 @@ render_section() {
   fi
 }
 
-render_section "$L_SESSION_5H" "$five_hr_left" "$five_color" "$five_hr_reset" "18000" "$five_hr_used" "true"
-echo "---"
-
-if [ "$HAS_SEVEN_DAY" = true ]; then
-  render_section "$L_WINDOW_7D" "$seven_day_left" "$seven_color" "$seven_day_reset" "604800" "$seven_day_used" "true"
-else
-  render_section "$L_WINDOW_7D" "" "" "" "" "" "false"
-fi
-
-if [ -n "$opus_used" ] && [ "$opus_used" != "null" ]; then
+# ----- Claude sections -----
+if [ "$CLAUDE_OK" = true ]; then
+  SUB_TYPE=$(echo "$CREDS" | $JQ -r '.claudeAiOauth.subscriptionType // "unknown"' 2>/dev/null)
+  echo "Claude Code (${SUB_TYPE}) | size=$S $(c "$TEXT_PRIMARY") bash='true' terminal=false"
   echo "---"
-  opus_left=$(calc_remaining "$opus_used")
-  opus_color=$(color_for_remaining "$opus_left")
-  render_section "$L_WINDOW_7D_OPUS" "$opus_left" "$opus_color" "$opus_reset" "604800" "$opus_used" "true"
-fi
-
-if [ -n "$sonnet_used" ] && [ "$sonnet_used" != "null" ]; then
+  render_section "$L_SESSION_5H" "$five_hr_left" "$five_color" "$five_hr_reset" "18000" "$five_hr_used" "true"
   echo "---"
-  sonnet_left=$(calc_remaining "$sonnet_used")
-  sonnet_color=$(color_for_remaining "$sonnet_left")
-  render_section "$L_WINDOW_7D_SONNET" "$sonnet_left" "$sonnet_color" "$sonnet_reset" "604800" "$sonnet_used" "true"
-fi
-
-# Extra Usage (pay-as-you-go credits) — show spend vs limit when enabled, otherwise mark it off
-if [ -n "$extra_limit_minor" ]; then
-  echo "---"
-  NOP="bash='true' terminal=false"
-  if [ "$extra_enabled" = "true" ]; then
-    extra_used_disp=$(awk -v m="${extra_used_minor:-0}" -v e="${extra_exponent:-2}" 'BEGIN { printf "%.2f", m/(10^e) }')
-    extra_limit_disp=$(awk -v m="$extra_limit_minor" -v e="${extra_exponent:-2}" 'BEGIN { printf "%.2f", m/(10^e) }')
-    echo "💳  ${L_EXTRA_USAGE}: ${extra_used_disp} / ${extra_limit_disp} ${extra_currency} | size=$S $(c "$TEXT_PRIMARY") $NOP"
+  if [ "$HAS_SEVEN_DAY" = true ]; then
+    render_section "$L_WINDOW_7D" "$seven_day_left" "$seven_color" "$seven_day_reset" "604800" "$seven_day_used" "true"
   else
-    echo "💳  ${L_EXTRA_USAGE}: ${L_EXTRA_OFF} | size=$S $(c "$TEXT_MUTED") $NOP"
+    render_section "$L_WINDOW_7D" "" "" "" "" "" "false"
   fi
+
+  # Per-model sub-limits: only when actually used (a 0% scoped limit is just noise)
+  if [ -n "$opus_used" ] && [ "$opus_used" != "null" ] && [ "${opus_used%.*}" -gt 0 ] 2>/dev/null; then
+    echo "---"
+    opus_left=$(calc_remaining "$opus_used")
+    render_section "$L_WINDOW_7D_OPUS" "$opus_left" "$(color_for_remaining "$opus_left")" "$opus_reset" "604800" "$opus_used" "true"
+  fi
+  if [ -n "$sonnet_used" ] && [ "$sonnet_used" != "null" ] && [ "${sonnet_used%.*}" -gt 0 ] 2>/dev/null; then
+    echo "---"
+    sonnet_left=$(calc_remaining "$sonnet_used")
+    render_section "$L_WINDOW_7D_SONNET" "$sonnet_left" "$(color_for_remaining "$sonnet_left")" "$sonnet_reset" "604800" "$sonnet_used" "true"
+  fi
+
+  # Extra Usage (pay-as-you-go) — spend vs limit when enabled, otherwise "off"
+  if [ -n "$extra_limit_minor" ]; then
+    echo "---"
+    NOP="bash='true' terminal=false"
+    if [ "$extra_enabled" = "true" ]; then
+      extra_used_disp=$(awk -v m="${extra_used_minor:-0}" -v e="${extra_exponent:-2}" 'BEGIN { printf "%.2f", m/(10^e) }')
+      extra_limit_disp=$(awk -v m="$extra_limit_minor" -v e="${extra_exponent:-2}" 'BEGIN { printf "%.2f", m/(10^e) }')
+      echo "💳  ${L_EXTRA_USAGE}: ${extra_used_disp} / ${extra_limit_disp} ${extra_currency} | size=$S $(c "$TEXT_PRIMARY") $NOP"
+    else
+      echo "💳  ${L_EXTRA_USAGE}: ${L_EXTRA_OFF} | size=$S $(c "$TEXT_MUTED") $NOP"
+    fi
+  fi
+
+  echo "---"
+  echo "$L_SOURCE: ${FETCH_STATUS} | size=$S $(c "$TEXT_SECONDARY") bash='true' terminal=false"
 fi
 
-echo "---"
-echo "$L_SOURCE: ${FETCH_STATUS} | size=$S $(c "$TEXT_SECONDARY") bash='true' terminal=false"
+# ----- Codex sections -----
+if [ "$CODEX_OK" = true ]; then
+  [ "$CLAUDE_OK" = true ] && echo "---"  # separator only when a Claude section precedes
+  echo "Codex (${cx_plan}) | size=$S $(c "$TEXT_PRIMARY") bash='true' terminal=false"
+  echo "---"
+  render_section "Codex 5h" "$cx_5h_left" "$(color_for_remaining "$cx_5h_left")" "$cx_5h_iso" "18000" "$cx_5h_used" "true"
+  echo "---"
+  render_section "Codex Weekly" "$cx_wk_left" "$(color_for_remaining "$cx_wk_left")" "$cx_wk_iso" "604800" "$cx_wk_used" "true"
+  NOP="bash='true' terminal=false"
+  if [ "$cx_credits_unlimited" = "true" ]; then
+    echo "💳  Codex credits: unlimited | size=$S $(c "$TEXT_SECONDARY") $NOP"
+  elif [ -n "$cx_credits_bal" ] && [ "$cx_credits_bal" != "null" ]; then
+    echo "💳  Codex credits: ${cx_credits_bal} | size=$S $(c "$TEXT_SECONDARY") $NOP"
+  fi
+  echo "---"
+  echo "$L_SOURCE: Codex ${CODEX_STATUS} | size=$S $(c "$TEXT_SECONDARY") bash='true' terminal=false"
+fi
 echo "---"
 echo "$L_REFRESH | bash='$SCRIPT_DIR/force-refresh.sh' terminal=false refresh=true $(c "$TEXT_SECONDARY") size=$S"
 echo "$L_OPEN_LOG | bash='open' param1='$LOG_FILE' terminal=false $(c "$TEXT_SECONDARY") size=$S"
@@ -1100,18 +1266,20 @@ else
 fi
 
 # ============================================================
-# NOTIFICATIONS (run after render so UI updates immediately)
+# NOTIFICATIONS (run after render so UI updates immediately) — Claude only
 # ============================================================
-check_and_notify "$L_SESSION_5H" "$five_hr_left" "5h"
-if [ "$HAS_SEVEN_DAY" = true ]; then
-  check_and_notify "$L_WINDOW_7D" "$seven_day_left" "7d"
-fi
+if [ "$CLAUDE_OK" = true ]; then
+  check_and_notify "$L_SESSION_5H" "$five_hr_left" "5h"
+  if [ "$HAS_SEVEN_DAY" = true ]; then
+    check_and_notify "$L_WINDOW_7D" "$seven_day_left" "7d"
+  fi
 
-# Reset reminders (desktop + phone if ntfy enabled)
-check_reset_reminder "$L_SESSION_5H" "$five_hr_reset" "5h" "$five_hr_left"
-if [ "$HAS_SEVEN_DAY" = true ]; then
-  check_reset_reminder "$L_WINDOW_7D" "$seven_day_reset" "7d" "$seven_day_left"
-fi
+  # Reset reminders (desktop + phone if ntfy enabled)
+  check_reset_reminder "$L_SESSION_5H" "$five_hr_reset" "5h" "$five_hr_left"
+  if [ "$HAS_SEVEN_DAY" = true ]; then
+    check_reset_reminder "$L_WINDOW_7D" "$seven_day_reset" "7d" "$seven_day_left"
+  fi
 
-# Silent status push to phone (ntfy only, throttled)
-ntfy_status_push
+  # Silent status push to phone (ntfy only, throttled)
+  ntfy_status_push
+fi

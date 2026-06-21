@@ -1,10 +1,10 @@
 # Claude Code Monitor
 
-Know exactly how much Claude Code you have left — right from your menu bar.
+Know exactly how much Claude Code (and now OpenAI Codex) you have left — right from your menu bar.
 
 A lightweight widget that tracks your **remaining** rate limits in real time, tells you when you're burning too fast, and alerts you before you run out. Available for **macOS** (SwiftBar) and **Windows** (system tray).
 
-**New in v11.0:** Per-model sub-limits (Sonnet and Opus), an Extra Usage row for pay-as-you-go credits, and a Refresh button that forces a live pull instead of re-showing the cache.
+**New in v12.0:** OpenAI Codex support. The macOS menu bar rotates between Claude and Codex, and the dropdown shows both. It works with whichever you have — Claude only, Codex only, or both. Codex's token is refreshed automatically and never leaves your machine.
 
 ---
 
@@ -80,7 +80,9 @@ At a glance: 🟢 >50% left · 🟡 20–50% left · 🔴 <20% left
 
 ## Features
 
-**See what's left** — 5-hour session, 7-day window, per-model sub-limits (Sonnet and Opus, when your plan reports them), and your pay-as-you-go Extra Usage balance.
+**Two tools, one menu bar** — tracks Claude Code and OpenAI Codex. The bar rotates between them, the dropdown lists both, and it works with whichever you're signed into. No Codex? It behaves exactly like the Claude-only version. No Claude? It shows just Codex.
+
+**See what's left** — for Claude: 5-hour session, 7-day window, per-model sub-limits (Sonnet and Opus, when your plan reports them), and your pay-as-you-go Extra Usage balance. For Codex: 5-hour and weekly limits, per-model limits, and credits.
 
 **Know when it resets** — countdown timer + local time, e.g., "Refills in 1h 49m (4:00 PM)". No timezone math needed.
 
@@ -227,23 +229,28 @@ NOTIFY_THRESHOLDS="50 25 10"
 
 ## How It Works
 
-1. Reads your Claude Code OAuth token from your system (macOS Keychain / Windows credentials file)
-2. Checks Anthropic's usage API for your current utilization
-3. Caches the response locally to avoid hitting rate limits
+1. Reads your Claude Code OAuth token (macOS Keychain / Windows credentials file) and, if present, your Codex token from `~/.codex/auth.json`
+2. Checks each provider's usage API — Anthropic's `oauth/usage` for Claude, ChatGPT's `wham/usage` for Codex
+3. Caches each response locally to avoid hitting rate limits
 4. Calculates remaining %, pace, and burnout projection
-5. Renders in the menu bar / system tray
-6. Sends alerts when thresholds are crossed
-7. Falls back to cached data if the API is unavailable
+5. Renders in the menu bar / system tray (macOS rotates between providers)
+6. Sends alerts when Claude thresholds are crossed
+7. Falls back to cached data if an API is unavailable
+
+These usage endpoints report your limits — they don't consume any of your quota, so polling every couple of minutes is free.
 
 Clicking **Refresh** skips the cache and pulls fresh numbers right away. The background runs (every 2 minutes by default) still use the cache so they don't trip the rate limit. When the API is rate-limited and the cached 5-hour window has already reset, the menu bar shows `~0%` and the dropdown says the window reset, so you don't mistake stale data for a real reading.
+
+If your Codex token has expired, the plugin refreshes it the same way Codex does (using the refresh token already on your machine) and writes the new token back to `~/.codex/auth.json` with owner-only permissions.
 
 ---
 
 ## Security
 
-- Your OAuth token **never leaves your machine** — it's only sent to Anthropic's servers
-- No tokens are written to disk or logged
-- The cache only stores usage percentages and reset times
+- Your tokens **never leave your machine** — the Claude token only goes to Anthropic, the Codex token only to OpenAI, over HTTPS
+- Tokens are never logged or printed, and never written into the menu output
+- Codex's `auth.json` and the local usage caches are kept at owner-only permissions (mode 600)
+- On a Codex token refresh, the new token is validated and written back atomically, preserving the rest of `auth.json` — a failed refresh leaves the file untouched
 - Phone alerts (ntfy) don't involve any tokens — just a topic name
 
 ---
@@ -259,6 +266,8 @@ Clicking **Refresh** skips the cache and pulls fresh numbers right away. The bac
 | `CC: error` | API error | Click **Open log** for details |
 | `CC: 429` | Rate limited | Wait a few minutes — it backs off automatically |
 | Widget not showing | SwiftBar not configured | Set folder to `~/SwiftBarPlugins` |
+| No Codex section | Codex not installed / not logged in | Codex is optional; install and run it once, or ignore if you only use Claude |
+| Codex section stale | Codex token expired and couldn't refresh | Run `codex` once to re-authenticate |
 
 **Windows**
 
@@ -280,6 +289,7 @@ Clicking **Refresh** skips the cache and pulls fresh numbers right away. The bac
 
 | Version | What changed |
 |---------|-------------|
+| **v12.0** | OpenAI Codex support (macOS): menu bar rotates between Claude and Codex, dropdown shows both, works with either or both. Codex token auto-refresh, written back securely. Per-model rows now appear only when actually used. |
 | **v11.0** | Per-model sub-limits (Sonnet, Opus). Extra Usage row for pay-as-you-go credits. Refresh now forces a live pull. Clearer staleness: `~0%` and a "window reset" note when rate-limited past a reset. |
 | **v10.0** | Phone alerts via ntfy (optional, no API keys). Smart reset reminders that only nudge when you're idle. Configurable from dropdown menu. |
 | **v9.2** | Auto-create helper scripts. Add MIT LICENSE. Fix jq detection. |
