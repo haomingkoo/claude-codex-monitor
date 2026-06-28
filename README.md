@@ -4,7 +4,7 @@ Know exactly how much Claude Code (and now OpenAI Codex) you have left — right
 
 A lightweight widget that tracks your **remaining** rate limits in real time, tells you when you're burning too fast, and alerts you before you run out. Available for **macOS** (SwiftBar) and **Windows** (system tray).
 
-**New in v12.0:** OpenAI Codex support. The macOS menu bar rotates between Claude and Codex, and the dropdown shows both. It works with whichever you have — Claude only, Codex only, or both. Codex's token is refreshed automatically and never leaves your machine.
+**New in v12.2:** Windows now supports Codex too. The tray works with Claude only, Codex only, or both, and uses different shapes so CC and CX are easy to tell apart.
 
 ---
 
@@ -13,7 +13,8 @@ A lightweight widget that tracks your **remaining** rate limits in real time, te
 **macOS (SwiftBar)**
 
 ```
-  52% · 7d:81%                         <- menu bar
+  🟢 CC 52%·7d:81%                     <- menu bar rotates
+  🟢 CX 5h:74%·wk:68%
 
   Claude Code (max)
   ---------------------------------
@@ -40,6 +41,20 @@ A lightweight widget that tracks your **remaining** rate limits in real time, te
   ---------------------------------
   Source: live
   ---------------------------------
+  Codex (plus)
+  ---------------------------------
+  Codex 5h
+  |||||||||||||||.....
+  74.0% remaining
+  Refills in 2h 10m (2:28 PM)
+  ---------------------------------
+  Codex Weekly
+  ||||||||||||||......
+  68.0% remaining
+  Refills in 3d 8h (Jun 30 6:00 PM)
+  ---------------------------------
+  Source: Codex live
+  ---------------------------------
   Refresh
   Open log
   ---------------------------------
@@ -51,7 +66,7 @@ A lightweight widget that tracks your **remaining** rate limits in real time, te
 
 Per-model rows (Sonnet, Opus) show up only when your plan reports them. The Extra Usage row shows your pay-as-you-go spend against its cap, or "off" when you have no extra-usage credits enabled.
 
-**Windows (System Tray)** — two icons rotate in the tray (donut ring for 5h, bar for 7d). Click for the full dropdown:
+**Windows (System Tray)** — tray icons rotate by provider/window: CC 5h is a donut, CC 7d is a bar, CX 5h is a diamond, and CX weekly is a square. Click for the full dropdown:
 
 ```
   Claude Code (max)
@@ -70,6 +85,18 @@ Per-model rows (Sonnet, Opus) show up only when your plan reports them. The Extr
   Pace: 0.7x
   Burns out in ~6d 11h
   ---------------------------------
+  Codex (plus)
+  ---------------------------------
+  Codex 5h  [diamond icon]
+  |||||||||||||||.....
+  74% remaining
+  Refills in 2h 10m (2:28 PM)
+  ---------------------------------
+  Codex Weekly  [square icon]
+  ||||||||||||||......
+  68% remaining
+  Refills in 3d 8h (Jun 30 6:00 PM)
+  ---------------------------------
   Refresh Now · Open Log
   Language / Settings / Exit
 ```
@@ -82,7 +109,7 @@ At a glance: 🟢 >50% left · 🟡 20–50% left · 🔴 <20% left
 
 **Two tools, one menu bar** — tracks Claude Code and OpenAI Codex. The bar rotates between them, the dropdown lists both, and it works with whichever you're signed into. No Codex? It behaves exactly like the Claude-only version. No Claude? It shows just Codex.
 
-**See what's left** — for Claude: 5-hour session, 7-day window, per-model sub-limits (Sonnet and Opus, when your plan reports them), and your pay-as-you-go Extra Usage balance. For Codex: 5-hour and weekly limits, per-model limits, and credits.
+**See what's left** — for Claude: 5-hour session, 7-day window, per-model sub-limits (Sonnet and Opus, when your plan reports them), and your pay-as-you-go Extra Usage balance. For Codex: 5-hour and weekly limits, plus credits when reported.
 
 **Know when it resets** — countdown timer + local time, e.g., "Refills in 1h 49m (4:00 PM)". No timezone math needed.
 
@@ -183,7 +210,7 @@ open -a SwiftBar
 
 You should see **🟢 XX% · 7d:XX%** in your menu bar. Everything else is created automatically.
 
-**Windows** — requires Windows 10/11, PowerShell 5.1+, and [Claude Code](https://docs.anthropic.com/en/docs/claude-code). You must have logged into Claude Code at least once.
+**Windows** — requires Windows 10/11 and PowerShell 5.1+. Log into [Claude Code](https://docs.anthropic.com/en/docs/claude-code), Codex, or both before launching.
 
 ```powershell
 # 1. Get the code
@@ -241,7 +268,7 @@ These usage endpoints report your limits — they don't consume any of your quot
 
 Clicking **Refresh** skips the cache and pulls fresh numbers right away. The background runs (every 2 minutes by default) still use the cache so they don't trip the rate limit. When the API is rate-limited and the cached 5-hour window has already reset, the menu bar shows `~0%` and the dropdown says the window reset, so you don't mistake stale data for a real reading.
 
-If your Codex token has expired, the plugin refreshes it the same way Codex does (using the refresh token already on your machine) and writes the new token back to `~/.codex/auth.json` with owner-only permissions.
+If your Codex token has expired, the monitor can refresh it with the refresh token already on your machine. On Windows it uses that refreshed token for the monitor run and leaves Codex's auth file alone.
 
 ---
 
@@ -249,8 +276,8 @@ If your Codex token has expired, the plugin refreshes it the same way Codex does
 
 - Your tokens **never leave your machine** — the Claude token only goes to Anthropic, the Codex token only to OpenAI, over HTTPS
 - Tokens are never logged or printed, and never written into the menu output
-- Codex's `auth.json` and the local usage caches are kept at owner-only permissions (mode 600)
-- On a Codex token refresh, the new token is validated and written back atomically, preserving the rest of `auth.json` — a failed refresh leaves the file untouched
+- Codex's `auth.json` is read locally; Windows does not rewrite it
+- Local usage caches are kept owner-readable where the platform supports it
 - Phone alerts (ntfy) don't involve any tokens — just a topic name
 
 ---
@@ -275,7 +302,7 @@ If your Codex token has expired, the plugin refreshes it the same way Codex does
 |---|---|---|
 | CMD window stays open | Outdated launcher | Update to latest version |
 | No tray icon | Script not running | Run `launch-monitor.bat` |
-| "No data" | Not logged in | Run `claude` in terminal and log in |
+| "No data" | Not logged into Claude or Codex | Log into `claude`, `codex`, or both |
 
 **Stuck on 429?** Wait 5 minutes (it backs off automatically). Still stuck? Run `claude auth logout` → `claude auth login`. As a last resort: `rm -rf ~/.cache/claude-usage`, re-authenticate, and restart SwiftBar.
 
@@ -289,7 +316,9 @@ If your Codex token has expired, the plugin refreshes it the same way Codex does
 
 | Version | What changed |
 |---------|-------------|
-| **v12.0** | OpenAI Codex support (macOS): menu bar rotates between Claude and Codex, dropdown shows both, works with either or both. Codex token auto-refresh, written back securely. Per-model rows now appear only when actually used. |
+| **v12.2** | Windows Codex support: tray works with Claude only, Codex only, or both. Shapes distinguish providers/windows: CC donut/bar, CX diamond/square. |
+| **v12.1** | Reliability/performance cleanup: SwiftBar cache TTL now tolerates scheduler jitter, reset timestamps are parsed once per section with native macOS tools first, Windows stale-cache fallback updates cache mtime, and repo/docs file modes are cleaned up. |
+| **v12.0** | OpenAI Codex support (macOS): menu bar rotates between Claude and Codex, dropdown shows both, works with either or both. Per-model rows now appear only when actually used. |
 | **v11.0** | Per-model sub-limits (Sonnet, Opus). Extra Usage row for pay-as-you-go credits. Refresh now forces a live pull. Clearer staleness: `~0%` and a "window reset" note when rate-limited past a reset. |
 | **v10.0** | Phone alerts via ntfy (optional, no API keys). Smart reset reminders that only nudge when you're idle. Configurable from dropdown menu. |
 | **v9.2** | Auto-create helper scripts. Add MIT LICENSE. Fix jq detection. |

@@ -12,6 +12,8 @@ With a 1-minute refresh interval, this meant **60 API calls per hour, all return
 ### The fix
 Added `touch "$CACHE_FILE"` in the 429/error handler so the cache mtime gets refreshed. Subsequent runs see "cache is fresh" and skip the API call, giving the rate limit time to recover.
 
+In v12.1 the Windows tray got the same fix: stale-cache fallback updates the cache mtime, and refresh interval changes now update the cache TTL too.
+
 ### If a user is stuck
 1. Update to v9.0+ (the fix is in the main script)
 2. If the token's rate limit is permanently exhausted, re-authenticate:

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # <xbar.title>Claude Code Usage</xbar.title>
-# <xbar.version>v12.0</xbar.version>
+# <xbar.version>v12.2</xbar.version>
 # <xbar.author>koohaoming</xbar.author>
 # <xbar.desc>Menu-bar usage for Claude Code and OpenAI Codex — rotates between providers; shows 5h, weekly, per-model sub-limits, and credits. Works with either or both.</xbar.desc>
 
@@ -36,13 +36,13 @@ else
   REFRESH_RATE="2m"
 fi
 
-# Set CACHE_TTL based on refresh rate
-# Note: SwiftBar runs this script every 2m (.2m.sh), so rates faster than 2m are not possible.
+# Set CACHE_TTL based on refresh rate.
+# Keep the 2m TTL below SwiftBar's cadence so scheduler jitter does not skip a refresh.
 case "$REFRESH_RATE" in
-  2m)  CACHE_TTL=120 ;;
-  5m)  CACHE_TTL=300 ;;
-  10m) CACHE_TTL=600 ;;
-  *)   CACHE_TTL=120 ;;
+  2m)  CACHE_TTL=110 ;;
+  5m)  CACHE_TTL=290 ;;
+  10m) CACHE_TTL=590 ;;
+  *)   CACHE_TTL=110 ;;
 esac
 
 # Notification thresholds (remaining %) — alerts when crossing below these
@@ -618,9 +618,23 @@ parse_reset_epoch() {
     echo ""
     return
   fi
-  # Try python3 first — handles any ISO 8601 timezone correctly
+  local clean_ts=$(echo "$reset_ts" | sed -E 's/\.[0-9]+//; s/Z$/+0000/; s/([+-][0-9][0-9]):([0-9][0-9])$/\1\2/')
+  local epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$clean_ts" "+%s" 2>/dev/null)
+  if [ -n "$epoch" ]; then
+    echo "$epoch"
+    return
+  fi
+
+  # Fallback for timestamps without an offset.
+  clean_ts=$(echo "$reset_ts" | sed -E 's/\.[0-9]+//; s/[+-][0-9][0-9]:?[0-9][0-9]$//; s/Z$//')
+  epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "$clean_ts" "+%s" 2>/dev/null)
+  if [ -n "$epoch" ]; then
+    echo "$epoch"
+    return
+  fi
+
   if command -v python3 &>/dev/null; then
-    local epoch=$(python3 -c "
+    epoch=$(python3 -c "
 from datetime import datetime, timezone
 ts = '$reset_ts'
 dt = datetime.fromisoformat(ts)
@@ -631,13 +645,6 @@ print(int(dt.astimezone(timezone.utc).timestamp()))
       return
     fi
   fi
-  # macOS fallback: strip offset, parse as UTC (works if API returns +00:00/Z)
-  local clean_ts=$(echo "$reset_ts" | sed 's/\.[0-9]*//; s/[+-][0-9][0-9]:[0-9][0-9]$//; s/Z$//')
-  local epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "$clean_ts" "+%s" 2>/dev/null)
-  if [ -n "$epoch" ]; then
-    echo "$epoch"
-    return
-  fi
   # Nothing worked
   log "WARN" "Could not parse timestamp: $reset_ts"
   echo ""
@@ -645,7 +652,8 @@ print(int(dt.astimezone(timezone.utc).timestamp()))
 
 format_reset() {
   local reset_ts="$1"
-  local epoch=$(parse_reset_epoch "$reset_ts")
+  local epoch="${2:-}"
+  [ -z "$epoch" ] && epoch=$(parse_reset_epoch "$reset_ts")
   if [ -z "$epoch" ]; then
     echo ""
     return
@@ -658,7 +666,8 @@ format_reset() {
 # Convert reset timestamp to local time string (e.g., "3:49 PM" or "Mar 15 3:49 PM")
 format_local_reset_time() {
   local reset_ts="$1"
-  local epoch=$(parse_reset_epoch "$reset_ts")
+  local epoch="${2:-}"
+  [ -z "$epoch" ] && epoch=$(parse_reset_epoch "$reset_ts")
   if [ -z "$epoch" ]; then
     echo ""
     return
@@ -684,6 +693,7 @@ format_burnout() {
   local utilization="$1"
   local reset_ts="$2"
   local window_seconds="$3"
+  local reset_epoch="${4:-}"
 
   local used_int=${utilization%.*}
   if [ "$used_int" -le 0 ] 2>/dev/null; then
@@ -691,7 +701,7 @@ format_burnout() {
     return
   fi
 
-  local reset_epoch=$(parse_reset_epoch "$reset_ts")
+  [ -z "$reset_epoch" ] && reset_epoch=$(parse_reset_epoch "$reset_ts")
   if [ -z "$reset_epoch" ]; then
     echo ""
     return
@@ -731,6 +741,7 @@ calc_pace() {
   local utilization="$1"
   local reset_ts="$2"
   local window_seconds="$3"
+  local reset_epoch="${4:-}"
 
   local used_int=${utilization%.*}
   if [ "$used_int" -le 0 ] 2>/dev/null; then
@@ -738,7 +749,7 @@ calc_pace() {
     return
   fi
 
-  local reset_epoch=$(parse_reset_epoch "$reset_ts")
+  [ -z "$reset_epoch" ] && reset_epoch=$(parse_reset_epoch "$reset_ts")
   if [ -z "$reset_epoch" ]; then
     echo ""
     return
@@ -874,9 +885,9 @@ check_reset_reminder() {
   # (if pace > 1.3x they're clearly at the computer and don't need a reminder)
   local remaining_int=${remaining%.*}
   if [ "$key" = "5h" ]; then
-    local pace=$(calc_pace "$five_hr_used" "$five_hr_reset" "18000")
+    local pace=$(calc_pace "$five_hr_used" "$five_hr_reset" "18000" "$epoch")
   else
-    local pace=$(calc_pace "$seven_day_used" "$seven_day_reset" "604800")
+    local pace=$(calc_pace "$seven_day_used" "$seven_day_reset" "604800" "$epoch")
   fi
   if [ -n "$pace" ]; then
     local pace_x10=$(echo "scale=0; $pace * 10 / 1" | bc)
@@ -1118,8 +1129,9 @@ render_section() {
 
   local icon=$(status_icon "$left")
   local bar=$(progress_bar "$left")
-  local reset_str=$(format_reset "$reset_ts")
-  local local_time=$(format_local_reset_time "$reset_ts")
+  local reset_epoch=$(parse_reset_epoch "$reset_ts")
+  local reset_str=$(format_reset "$reset_ts" "$reset_epoch")
+  local local_time=$(format_local_reset_time "$reset_ts" "$reset_epoch")
   local bar_col=$(bar_color_for_remaining "$left")
 
   echo "${icon}  ${label} | size=$S $(c "$TEXT_PRIMARY") $NOP"
@@ -1132,20 +1144,19 @@ render_section() {
   elif [ -n "$reset_str" ]; then
     echo "$(fmt_refills "$reset_str") | size=$S $(c "$TEXT_SECONDARY") $NOP"
   elif [ -n "$reset_ts" ] && [ "$reset_ts" != "null" ]; then
-    local _re=$(parse_reset_epoch "$reset_ts")
     local _now=$(date +%s)
-    [ -n "$_re" ] && [ "$_re" -lt "$_now" ] && echo "Window reset — awaiting fresh data | size=$S $(c "$TEXT_MUTED") $NOP"
+    [ -n "$reset_epoch" ] && [ "$reset_epoch" -lt "$_now" ] && echo "Window reset — awaiting fresh data | size=$S $(c "$TEXT_MUTED") $NOP"
   fi
 
   # Pace indicator + burnout projection
   if [ -n "$window_secs" ] && [ -n "$utilization" ]; then
-    local pace=$(calc_pace "$utilization" "$reset_ts" "$window_secs")
+    local pace=$(calc_pace "$utilization" "$reset_ts" "$window_secs" "$reset_epoch")
     if [ -n "$pace" ]; then
       local picon=$(pace_icon "$pace")
       echo "${picon} $(fmt_pace "$pace") | size=$S $(c "$TEXT_SECONDARY") $NOP"
     fi
 
-    local burnout=$(format_burnout "$utilization" "$reset_ts" "$window_secs")
+    local burnout=$(format_burnout "$utilization" "$reset_ts" "$window_secs" "$reset_epoch")
     if [ -n "$burnout" ]; then
       echo "$(fmt_burns "$burnout") | size=$S $(c "$TEXT_SECONDARY") $NOP"
     fi

@@ -1,12 +1,12 @@
 # ============================================================
-# Claude Code Usage Monitor - Windows System Tray  (v8.0)
+# Claude Code Usage Monitor - Windows System Tray  (v12.2)
 # ============================================================
-# A lightweight system tray app that shows Claude Code rate
-# limits in real time. No dependencies beyond PowerShell 5.1+
+# A lightweight system tray app that shows Claude Code and Codex
+# rate limits in real time. No dependencies beyond PowerShell 5.1+
 # and .NET Framework (both ship with Windows 10/11).
 #
 # Features:
-#   - Dual rotating icons (donut for 5h, bar for 7d)
+#   - Rotating icons (CC donut/bar, CX diamond/square)
 #   - Pace calculation & burnout projection
 #   - 6-language UI (en, zh, ja, ko, ta, ms)
 #   - Toast notifications at 50%, 25%, 10% thresholds
@@ -23,12 +23,18 @@ Add-Type -AssemblyName System.Drawing
 # ============================================================
 $script:CacheDir    = Join-Path $env:USERPROFILE ".cache\claude-usage"
 $script:CacheFile   = Join-Path $script:CacheDir "usage.json"
+$script:CodexCacheFile = Join-Path $script:CacheDir "codex_usage.json"
+$script:CodexAuthFile = Join-Path $env:USERPROFILE ".codex\auth.json"
 $script:LogFile     = Join-Path $script:CacheDir "monitor.log"
 $script:LangFile    = Join-Path $script:CacheDir "language"
-$script:CacheTTL    = 120          # seconds
-$script:PollInterval = 60          # seconds between data refresh
+$script:PollInterval = 120         # seconds between data refresh
+$script:CacheTTLSkew = 10          # seconds; avoid timer jitter missing a refresh
+$script:CacheTTL    = [Math]::Max(0, $script:PollInterval - $script:CacheTTLSkew)
 $script:IconRotateInterval = 4     # seconds between icon shape toggle
 $script:NotifyThresholds = @(50, 25, 10)
+$script:CodexUsageUrl = "https://chatgpt.com/backend-api/wham/usage"
+$script:CodexTokenUrl = "https://auth.openai.com/oauth/token"
+$script:CodexClientId = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 # 5-hour = 18000s, 7-day = 604800s
 $script:Window5h = 18000
@@ -56,7 +62,7 @@ function Write-Log {
     }
 }
 
-Write-Log "INFO" "Monitor started (v8.0)"
+Write-Log "INFO" "Monitor started (v12.2)"
 
 # ============================================================
 # TRANSLATIONS
@@ -224,7 +230,7 @@ $script:L = Get-Translations $script:CurrentLang
 function Get-OAuthToken {
     $credFile = Join-Path $env:USERPROFILE ".claude\.credentials.json"
     if (-not (Test-Path $credFile)) {
-        Write-Log "ERROR" "Credentials file not found: $credFile"
+        Write-Log "INFO" "Claude credentials not found"
         return $null
     }
     try {
@@ -258,7 +264,7 @@ function Get-Usage {
 
     $token = Get-OAuthToken
     if (-not $token) {
-        $script:FetchStatus = "no auth"
+        $script:FetchStatus = "not logged in"
         return $null
     }
 
@@ -294,10 +300,96 @@ function Get-Usage {
 
         # Fall back to stale cache
         if (Test-Path $script:CacheFile) {
+            (Get-Item $script:CacheFile).LastWriteTime = Get-Date
             return (Get-Content $script:CacheFile -Raw | ConvertFrom-Json)
         }
         return $null
     }
+}
+
+function Invoke-CodexUsageRequest {
+    param([string]$AccessToken, [string]$AccountId)
+    $headers = @{
+        "Authorization" = "Bearer $AccessToken"
+        "User-Agent"    = "codex_cli_rs"
+        "originator"    = "codex_cli_rs"
+        "Accept"        = "application/json"
+    }
+    if (-not [string]::IsNullOrEmpty($AccountId)) {
+        $headers["ChatGPT-Account-Id"] = $AccountId
+    }
+
+    try {
+        $response = Invoke-WebRequest -Uri $script:CodexUsageUrl `
+            -Headers $headers -Method Get -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
+        return @{ StatusCode = [int]$response.StatusCode; Content = $response.Content }
+    } catch {
+        $statusCode = $null
+        if ($_.Exception.Response) { $statusCode = [int]$_.Exception.Response.StatusCode }
+        return @{ StatusCode = $statusCode; Content = $null }
+    }
+}
+
+function Get-CodexUsage {
+    if (-not (Test-Path $script:CodexAuthFile)) {
+        $script:CodexFetchStatus = "not logged in"
+        return $null
+    }
+
+    if (Test-Path $script:CodexCacheFile) {
+        $cacheAge = ((Get-Date) - (Get-Item $script:CodexCacheFile).LastWriteTime).TotalSeconds
+        if ($cacheAge -lt $script:CacheTTL) {
+            $script:CodexFetchStatus = "cached ($([int]$cacheAge)s ago)"
+            return (Get-Content $script:CodexCacheFile -Raw | ConvertFrom-Json)
+        }
+    }
+
+    try {
+        $auth = Get-Content $script:CodexAuthFile -Raw | ConvertFrom-Json
+        $accessToken = $auth.tokens.access_token
+        $accountId = $auth.tokens.account_id
+        if ([string]::IsNullOrEmpty($accessToken)) {
+            $script:CodexFetchStatus = "no token"
+            return $null
+        }
+
+        $result = Invoke-CodexUsageRequest $accessToken $accountId
+
+        if ($result.StatusCode -eq 401 -and $auth.tokens.refresh_token) {
+            Write-Log "INFO" "Codex token expired - refreshing"
+            $body = @{
+                client_id = $script:CodexClientId
+                grant_type = "refresh_token"
+                refresh_token = $auth.tokens.refresh_token
+            } | ConvertTo-Json -Compress
+            try {
+                $tokenResponse = Invoke-RestMethod -Uri $script:CodexTokenUrl `
+                    -Method Post -ContentType "application/json" -Body $body -TimeoutSec 10
+                if ($tokenResponse.access_token) {
+                    $result = Invoke-CodexUsageRequest $tokenResponse.access_token $accountId
+                }
+            } catch {
+                Write-Log "WARN" "Codex token refresh failed: $_"
+            }
+        }
+
+        if ($result.StatusCode -eq 200 -and $result.Content) {
+            $result.Content | Set-Content $script:CodexCacheFile -Force
+            $script:CodexFetchStatus = "live"
+            return ($result.Content | ConvertFrom-Json)
+        }
+
+        Write-Log "WARN" "Codex usage fetch failed (HTTP $($result.StatusCode))"
+        $script:CodexFetchStatus = "stale (HTTP $($result.StatusCode))"
+        if (Test-Path $script:CodexCacheFile) {
+            (Get-Item $script:CodexCacheFile).LastWriteTime = Get-Date
+            return (Get-Content $script:CodexCacheFile -Raw | ConvertFrom-Json)
+        }
+    } catch {
+        Write-Log "WARN" "Codex usage failed: $_"
+    }
+
+    return $null
 }
 
 # ============================================================
@@ -388,6 +480,75 @@ function New-BarIcon {
     return $bmp
 }
 
+function New-DiamondIcon {
+    param([int]$Percent, [string]$ColorTier)
+
+    $bmp = New-Object System.Drawing.Bitmap(16, 16)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.Clear([System.Drawing.Color]::Transparent)
+
+    $color = Get-TierColor $ColorTier
+    $points = [System.Drawing.Point[]]@(
+        (New-Object System.Drawing.Point -ArgumentList 8, 1),
+        (New-Object System.Drawing.Point -ArgumentList 15, 8),
+        (New-Object System.Drawing.Point -ArgumentList 8, 15),
+        (New-Object System.Drawing.Point -ArgumentList 1, 8)
+    )
+
+    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $path.AddPolygon($points)
+
+    $bgBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(60, 60, 60))
+    $g.FillPath($bgBrush, $path)
+    $bgBrush.Dispose()
+
+    if ($Percent -gt 0) {
+        $fillHeight = [Math]::Max(1, [int](14 * $Percent / 100))
+        $fillY = 15 - $fillHeight
+        $g.SetClip($path)
+        $brush = New-Object System.Drawing.SolidBrush($color)
+        $g.FillRectangle($brush, 1, $fillY, 14, $fillHeight)
+        $brush.Dispose()
+        $g.ResetClip()
+    }
+
+    $borderPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(100, 100, 100), 1)
+    $g.DrawPath($borderPen, $path)
+    $borderPen.Dispose()
+    $path.Dispose()
+    $g.Dispose()
+    return $bmp
+}
+
+function New-SquareIcon {
+    param([int]$Percent, [string]$ColorTier)
+
+    $bmp = New-Object System.Drawing.Bitmap(16, 16)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.Clear([System.Drawing.Color]::Transparent)
+
+    $color = Get-TierColor $ColorTier
+
+    $bgBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(60, 60, 60))
+    $g.FillRectangle($bgBrush, 2, 2, 12, 12)
+    $bgBrush.Dispose()
+
+    if ($Percent -gt 0) {
+        $fillHeight = [Math]::Max(1, [int](12 * $Percent / 100))
+        $fillY = 14 - $fillHeight
+        $brush = New-Object System.Drawing.SolidBrush($color)
+        $g.FillRectangle($brush, 2, $fillY, 12, $fillHeight)
+        $brush.Dispose()
+    }
+
+    $borderPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(100, 100, 100), 1)
+    $g.DrawRectangle($borderPen, 2, 2, 12, 12)
+    $borderPen.Dispose()
+    $g.Dispose()
+    return $bmp
+}
+
 function Set-TrayIconFromBitmap {
     param([System.Drawing.Bitmap]$Bmp)
 
@@ -416,13 +577,7 @@ function Get-ColorTier {
 
 function ConvertTo-Emoji {
     param([int]$CodePoint)
-    # Handle supplementary Unicode (above U+FFFF) via surrogate pairs
-    if ($CodePoint -gt 0xFFFF) {
-        $hi = [char](0xD800 + (($CodePoint - 0x10000) -shr 10))
-        $lo = [char](0xDC00 + (($CodePoint - 0x10000) -band 0x3FF))
-        return "$hi$lo"
-    }
-    return [string][char]$CodePoint
+    return [char]::ConvertFromUtf32($CodePoint)
 }
 
 function Get-StatusEmoji {
@@ -560,13 +715,99 @@ function Send-ThresholdNotification {
 # ============================================================
 # Store parsed data for icon rotation
 $script:DisplayData = $null
-$script:ShowingDonut = $true  # Toggle between donut (5h) and bar (7d)
+$script:IconPhase = 0
+
+function Set-DataRefreshInterval {
+    param([int]$Seconds)
+    $script:PollInterval = $Seconds
+    $script:CacheTTL = [Math]::Max(0, $Seconds - $script:CacheTTLSkew)
+    if ($script:DataTimer) {
+        $script:DataTimer.Interval = $Seconds * 1000
+    }
+}
+
+function Convert-CodexReset {
+    param($Epoch)
+    if (-not $Epoch) { return "" }
+    try {
+        return [DateTimeOffset]::FromUnixTimeSeconds([int64]$Epoch).UtcDateTime.ToString("o")
+    } catch {
+        return ""
+    }
+}
 
 function Update-Display {
     try {
         $usage = Get-Usage
-        if (-not $usage) {
-            $script:NotifyIcon.Text = "Claude Code: $($script:L.NoData)"
+        $codexUsage = Get-CodexUsage
+
+        $script:DisplayData = @{
+            HasClaude = $false
+            HasCodex = $false
+        }
+
+        if ($usage -and $usage.five_hour -and $null -ne $usage.five_hour.utilization) {
+            $fiveHrUsed   = [double]$usage.five_hour.utilization
+            $fiveHrReset  = $usage.five_hour.resets_at
+            $sevenDayUsed = [double]$usage.seven_day.utilization
+            $sevenDayReset = $usage.seven_day.resets_at
+
+            $fiveHrLeft   = [Math]::Round(100 - $fiveHrUsed, 1)
+            $sevenDayLeft = [Math]::Round(100 - $sevenDayUsed, 1)
+
+            $script:DisplayData["HasClaude"] = $true
+            $script:DisplayData["FiveHrLeft"] = $fiveHrLeft
+            $script:DisplayData["FiveHrUsed"] = $fiveHrUsed
+            $script:DisplayData["FiveColor"] = Get-ColorTier $fiveHrLeft
+            $script:DisplayData["FiveReset"] = $fiveHrReset
+            $script:DisplayData["FivePace"] = Get-Pace $fiveHrUsed $fiveHrReset $script:Window5h
+            $script:DisplayData["FiveBurnout"] = Get-Burnout $fiveHrUsed $fiveHrReset $script:Window5h
+            $script:DisplayData["SevenDayLeft"] = $sevenDayLeft
+            $script:DisplayData["SevenDayUsed"] = $sevenDayUsed
+            $script:DisplayData["SevenColor"] = Get-ColorTier $sevenDayLeft
+            $script:DisplayData["SevenReset"] = $sevenDayReset
+            $script:DisplayData["SevenPace"] = Get-Pace $sevenDayUsed $sevenDayReset $script:Window7d
+            $script:DisplayData["SevenBurnout"] = Get-Burnout $sevenDayUsed $sevenDayReset $script:Window7d
+
+            if ($usage.seven_day_opus -and $null -ne $usage.seven_day_opus.utilization) {
+                $opusUsed = [double]$usage.seven_day_opus.utilization
+                $opusLeft = [Math]::Round(100 - $opusUsed, 1)
+                $opusReset = $usage.seven_day_opus.resets_at
+                $script:DisplayData["OpusLeft"] = $opusLeft
+                $script:DisplayData["OpusUsed"] = $opusUsed
+                $script:DisplayData["OpusColor"] = Get-ColorTier $opusLeft
+                $script:DisplayData["OpusReset"] = $opusReset
+                $script:DisplayData["OpusPace"] = Get-Pace $opusUsed $opusReset $script:Window7d
+                $script:DisplayData["OpusBurnout"] = Get-Burnout $opusUsed $opusReset $script:Window7d
+            }
+        }
+
+        if ($codexUsage -and $codexUsage.rate_limit.primary_window -and $null -ne $codexUsage.rate_limit.primary_window.used_percent) {
+            $cxFiveUsed = [double]$codexUsage.rate_limit.primary_window.used_percent
+            $cxWeekUsed = [double]$codexUsage.rate_limit.secondary_window.used_percent
+            $cxFiveLeft = [Math]::Round(100 - $cxFiveUsed, 1)
+            $cxWeekLeft = [Math]::Round(100 - $cxWeekUsed, 1)
+            $cxFiveReset = Convert-CodexReset $codexUsage.rate_limit.primary_window.reset_at
+            $cxWeekReset = Convert-CodexReset $codexUsage.rate_limit.secondary_window.reset_at
+
+            $script:DisplayData["HasCodex"] = $true
+            $script:DisplayData["CodexPlan"] = if ($codexUsage.plan_type) { $codexUsage.plan_type } else { "codex" }
+            $script:DisplayData["CodexFiveLeft"] = $cxFiveLeft
+            $script:DisplayData["CodexFiveUsed"] = $cxFiveUsed
+            $script:DisplayData["CodexFiveColor"] = Get-ColorTier $cxFiveLeft
+            $script:DisplayData["CodexFiveReset"] = $cxFiveReset
+            $script:DisplayData["CodexFivePace"] = Get-Pace $cxFiveUsed $cxFiveReset $script:Window5h
+            $script:DisplayData["CodexFiveBurnout"] = Get-Burnout $cxFiveUsed $cxFiveReset $script:Window5h
+            $script:DisplayData["CodexWeekLeft"] = $cxWeekLeft
+            $script:DisplayData["CodexWeekUsed"] = $cxWeekUsed
+            $script:DisplayData["CodexWeekColor"] = Get-ColorTier $cxWeekLeft
+            $script:DisplayData["CodexWeekReset"] = $cxWeekReset
+            $script:DisplayData["CodexWeekPace"] = Get-Pace $cxWeekUsed $cxWeekReset $script:Window7d
+            $script:DisplayData["CodexWeekBurnout"] = Get-Burnout $cxWeekUsed $cxWeekReset $script:Window7d
+        }
+
+        if (-not $script:DisplayData.HasClaude -and -not $script:DisplayData.HasCodex) {
+            $script:NotifyIcon.Text = "Claude/Codex: $($script:L.NoData)"
             $script:DisplayData = $null
             $bmp = New-DonutIcon -Percent 0 -ColorTier "red"
             Set-TrayIconFromBitmap $bmp
@@ -574,104 +815,65 @@ function Update-Display {
             return
         }
 
-        # Parse usage data
-        $fiveHrUsed   = [double]($usage.five_hour.utilization)
-        $fiveHrReset  = $usage.five_hour.resets_at
-        $sevenDayUsed = [double]($usage.seven_day.utilization)
-        $sevenDayReset = $usage.seven_day.resets_at
-
-        $fiveHrLeft   = [Math]::Round(100 - $fiveHrUsed, 1)
-        $sevenDayLeft = [Math]::Round(100 - $sevenDayUsed, 1)
-
-        $fiveColor = Get-ColorTier $fiveHrLeft
-        $sevenColor = Get-ColorTier $sevenDayLeft
-
-        # Pace & burnout
-        $fivePace = Get-Pace $fiveHrUsed $fiveHrReset $script:Window5h
-        $fiveBurnout = Get-Burnout $fiveHrUsed $fiveHrReset $script:Window5h
-        $sevenPace = Get-Pace $sevenDayUsed $sevenDayReset $script:Window7d
-        $sevenBurnout = Get-Burnout $sevenDayUsed $sevenDayReset $script:Window7d
-
-        # Opus (optional)
-        $opusLeft = $null
-        $opusReset = $null
-        $opusColor = $null
-        $opusPace = $null
-        $opusBurnout = ""
-        if ($usage.seven_day_opus -and $usage.seven_day_opus.utilization) {
-            $opusUsed = [double]($usage.seven_day_opus.utilization)
-            $opusLeft = [Math]::Round(100 - $opusUsed, 1)
-            $opusReset = $usage.seven_day_opus.resets_at
-            $opusColor = Get-ColorTier $opusLeft
-            $opusPace = Get-Pace $opusUsed $opusReset $script:Window7d
-            $opusBurnout = Get-Burnout $opusUsed $opusReset $script:Window7d
-        }
-
-        # Store data for icon rotation
-        $script:DisplayData = @{
-            FiveHrLeft    = $fiveHrLeft
-            FiveHrUsed    = $fiveHrUsed
-            FiveColor     = $fiveColor
-            FiveReset     = $fiveHrReset
-            FivePace      = $fivePace
-            FiveBurnout   = $fiveBurnout
-            SevenDayLeft  = $sevenDayLeft
-            SevenDayUsed  = $sevenDayUsed
-            SevenColor    = $sevenColor
-            SevenReset    = $sevenDayReset
-            SevenPace     = $sevenPace
-            SevenBurnout  = $sevenBurnout
-            OpusLeft      = $opusLeft
-            OpusUsed      = if ($opusLeft -ne $null) { $opusUsed } else { $null }
-            OpusColor     = $opusColor
-            OpusReset     = $opusReset
-            OpusPace      = $opusPace
-            OpusBurnout   = $opusBurnout
-        }
-
         # Set initial icon
         Update-RotatingIcon
 
-        # Tooltip (max 63 chars)
-        $tooltip = "5h: $([int]$fiveHrLeft)% | 7d: $([int]$sevenDayLeft)%"
-        if ($opusLeft -ne $null) { $tooltip += " | Opus: $([int]$opusLeft)%" }
+        $tips = @()
+        if ($script:DisplayData.HasClaude) {
+            $tips += "CC $([int]$script:DisplayData.FiveHrLeft)%/$([int]$script:DisplayData.SevenDayLeft)%"
+        }
+        if ($script:DisplayData.HasCodex) {
+            $tips += "CX $([int]$script:DisplayData.CodexFiveLeft)%/$([int]$script:DisplayData.CodexWeekLeft)%"
+        }
+        $tooltip = ($tips -join " | ")
         $script:NotifyIcon.Text = $tooltip
 
-        Write-Log "INFO" "5h: ${fiveHrLeft}% | 7d: ${sevenDayLeft}% | src: $($script:FetchStatus)"
+        Write-Log "INFO" "Display updated | Claude: $($script:FetchStatus) | Codex: $($script:CodexFetchStatus)"
 
         # Update context menu
         Update-ContextMenu $script:DisplayData
 
-        # Notifications
-        Send-ThresholdNotification $script:L.Session5h $fiveHrLeft "5h"
-        Send-ThresholdNotification $script:L.Window7d $sevenDayLeft "7d"
+        if ($script:DisplayData.HasClaude) {
+            Send-ThresholdNotification $script:L.Session5h $script:DisplayData.FiveHrLeft "5h"
+            Send-ThresholdNotification $script:L.Window7d $script:DisplayData.SevenDayLeft "7d"
+        }
     } catch {
         Write-Log "ERROR" "Update-Display failed: $_"
     }
 }
 
-# Toggle between donut and bar icon every few seconds
+# Toggle provider/window icon every few seconds.
 function Update-RotatingIcon {
     if (-not $script:DisplayData) { return }
 
-    if ($script:ShowingDonut) {
-        # Donut for 5-hour session
-        $bmp = New-DonutIcon -Percent ([int]$script:DisplayData.FiveHrLeft) -ColorTier $script:DisplayData.FiveColor
-    } else {
-        # Bar for 7-day window
-        $bmp = New-BarIcon -Percent ([int]$script:DisplayData.SevenDayLeft) -ColorTier $script:DisplayData.SevenColor
+    $phases = @()
+    if ($script:DisplayData.HasClaude) { $phases += "cc5"; $phases += "cc7" }
+    if ($script:DisplayData.HasCodex) { $phases += "cx5"; $phases += "cxw" }
+    if ($phases.Count -eq 0) { return }
+
+    $phase = $phases[$script:IconPhase % $phases.Count]
+    switch ($phase) {
+        "cc5" {
+            $bmp = New-DonutIcon -Percent ([int]$script:DisplayData.FiveHrLeft) -ColorTier $script:DisplayData.FiveColor
+            $tip = "CC 5h $([int]$script:DisplayData.FiveHrLeft)% (donut)"
+        }
+        "cc7" {
+            $bmp = New-BarIcon -Percent ([int]$script:DisplayData.SevenDayLeft) -ColorTier $script:DisplayData.SevenColor
+            $tip = "CC 7d $([int]$script:DisplayData.SevenDayLeft)% (bar)"
+        }
+        "cx5" {
+            $bmp = New-DiamondIcon -Percent ([int]$script:DisplayData.CodexFiveLeft) -ColorTier $script:DisplayData.CodexFiveColor
+            $tip = "CX 5h $([int]$script:DisplayData.CodexFiveLeft)% (diamond)"
+        }
+        default {
+            $bmp = New-SquareIcon -Percent ([int]$script:DisplayData.CodexWeekLeft) -ColorTier $script:DisplayData.CodexWeekColor
+            $tip = "CX weekly $([int]$script:DisplayData.CodexWeekLeft)% (square)"
+        }
     }
 
     Set-TrayIconFromBitmap $bmp
-
-    # Update tooltip with current shape context
-    $fullTip = "5h: $([int]$script:DisplayData.FiveHrLeft)% | 7d: $([int]$script:DisplayData.SevenDayLeft)%"
-    if ($script:DisplayData.OpusLeft -ne $null) {
-        $fullTip += " | Opus: $([int]$script:DisplayData.OpusLeft)%"
-    }
-    $script:NotifyIcon.Text = $fullTip
-
-    $script:ShowingDonut = -not $script:ShowingDonut
+    $script:NotifyIcon.Text = $tip
+    $script:IconPhase = ($script:IconPhase + 1) % $phases.Count
 }
 
 # ============================================================
@@ -734,33 +936,53 @@ function Update-ContextMenu {
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
     $menu.RenderMode = [System.Windows.Forms.ToolStripRenderMode]::System
 
-    $subType = if ($script:SubscriptionType) { $script:SubscriptionType } else { "unknown" }
-    $header = $menu.Items.Add("Claude Code ($subType)")
+    $header = $menu.Items.Add("Claude Code Monitor")
     $header.Enabled = $false
     $header.Font = $script:FontBold
     $menu.Items.Add("-") | Out-Null
 
     if ($Data) {
-        # 5-Hour Session (donut shape)
-        Add-SectionToMenu $menu $script:L.Session5h $Data.FiveHrLeft $Data.FiveColor `
-            $Data.FiveReset $Data.FivePace $Data.FiveBurnout $script:Window5h "[donut]"
+        if ($Data.HasClaude) {
+            $subType = if ($script:SubscriptionType) { $script:SubscriptionType } else { "unknown" }
+            $ccHeader = $menu.Items.Add("Claude Code ($subType)")
+            $ccHeader.Enabled = $false
 
-        $menu.Items.Add("-") | Out-Null
+            Add-SectionToMenu $menu $script:L.Session5h $Data.FiveHrLeft $Data.FiveColor `
+                $Data.FiveReset $Data.FivePace $Data.FiveBurnout $script:Window5h "[donut]"
 
-        # 7-Day Window (bar shape)
-        Add-SectionToMenu $menu $script:L.Window7d $Data.SevenDayLeft $Data.SevenColor `
-            $Data.SevenReset $Data.SevenPace $Data.SevenBurnout $script:Window7d "[bar]"
-
-        # Opus (if available)
-        if ($Data.OpusLeft -ne $null) {
             $menu.Items.Add("-") | Out-Null
-            Add-SectionToMenu $menu $script:L.Window7dOpus $Data.OpusLeft $Data.OpusColor `
-                $Data.OpusReset $Data.OpusPace $Data.OpusBurnout $script:Window7d ""
+
+            Add-SectionToMenu $menu $script:L.Window7d $Data.SevenDayLeft $Data.SevenColor `
+                $Data.SevenReset $Data.SevenPace $Data.SevenBurnout $script:Window7d "[bar]"
+
+            if ($Data.OpusLeft -ne $null) {
+                $menu.Items.Add("-") | Out-Null
+                Add-SectionToMenu $menu $script:L.Window7dOpus $Data.OpusLeft $Data.OpusColor `
+                    $Data.OpusReset $Data.OpusPace $Data.OpusBurnout $script:Window7d ""
+            }
+
+            $menu.Items.Add("-") | Out-Null
+            $srcItem = $menu.Items.Add("$($script:L.Source): Claude $($script:FetchStatus)")
+            $srcItem.Enabled = $false
         }
 
-        $menu.Items.Add("-") | Out-Null
-        $srcItem = $menu.Items.Add("$($script:L.Source): $($script:FetchStatus)")
-        $srcItem.Enabled = $false
+        if ($Data.HasCodex) {
+            if ($Data.HasClaude) { $menu.Items.Add("-") | Out-Null }
+            $cxHeader = $menu.Items.Add("Codex ($($Data.CodexPlan))")
+            $cxHeader.Enabled = $false
+
+            Add-SectionToMenu $menu "Codex 5h" $Data.CodexFiveLeft $Data.CodexFiveColor `
+                $Data.CodexFiveReset $Data.CodexFivePace $Data.CodexFiveBurnout $script:Window5h "[diamond]"
+
+            $menu.Items.Add("-") | Out-Null
+
+            Add-SectionToMenu $menu "Codex Weekly" $Data.CodexWeekLeft $Data.CodexWeekColor `
+                $Data.CodexWeekReset $Data.CodexWeekPace $Data.CodexWeekBurnout $script:Window7d "[square]"
+
+            $menu.Items.Add("-") | Out-Null
+            $cxSrcItem = $menu.Items.Add("$($script:L.Source): Codex $($script:CodexFetchStatus)")
+            $cxSrcItem.Enabled = $false
+        }
     } else {
         $menu.Items.Add($script:L.NoData).Enabled = $false
     }
@@ -770,9 +992,10 @@ function Update-ContextMenu {
     # Refresh button
     $refreshItem = $menu.Items.Add($script:L.Refresh)
     $refreshItem.Add_Click({
+        $oldCacheTTL = $script:CacheTTL
         $script:CacheTTL = 0
         Update-Display
-        $script:CacheTTL = 120
+        $script:CacheTTL = $oldCacheTTL
     })
 
     # Open log
@@ -857,8 +1080,7 @@ function Update-ContextMenu {
         $iItem.Tag = $secs
         $iItem.Add_Click({
             $newInterval = [int]$this.Tag
-            $script:PollInterval = $newInterval
-            $script:DataTimer.Interval = $newInterval * 1000
+            Set-DataRefreshInterval $newInterval
             Write-Log "INFO" "Data refresh interval changed to ${newInterval}s"
             Update-ContextMenu $script:DisplayData
         })
