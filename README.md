@@ -189,7 +189,7 @@ brew install jq
 # 2. Get the plugin (recommended)
 mkdir -p ~/SwiftBarPlugins
 curl -o ~/SwiftBarPlugins/claude-code-monitor.2m.sh \
-  https://raw.githubusercontent.com/haomingkoo/claude-code-monitor/main/claude-code-monitor.2m.sh
+  https://raw.githubusercontent.com/haomingkoo/claude-codex-monitor/main/claude-code-monitor.2m.sh
 chmod +x ~/SwiftBarPlugins/claude-code-monitor.2m.sh
 
 # 3. Open SwiftBar → set plugin folder to ~/SwiftBarPlugins
@@ -204,7 +204,7 @@ You should see **🟢 XX% · 7d:XX%** in your menu bar. Everything else is creat
 
 ```powershell
 # 1. Get the code
-git clone https://github.com/haomingkoo/claude-code-monitor.git
+git clone https://github.com/haomingkoo/claude-codex-monitor.git
 
 # 2. Run it
 .\windows\launch-monitor.bat
