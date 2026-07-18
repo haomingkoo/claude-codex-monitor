@@ -1,5 +1,5 @@
 # ============================================================
-# Claude Code Usage Monitor - Windows System Tray  (v12.2)
+# Claude + Codex Usage Monitor - Windows System Tray  (v12.3)
 # ============================================================
 # A lightweight system tray app that shows Claude Code and Codex
 # rate limits in real time. No dependencies beyond PowerShell 5.1+
@@ -62,7 +62,7 @@ function Write-Log {
     }
 }
 
-Write-Log "INFO" "Monitor started (v12.2)"
+Write-Log "INFO" "Monitor started (v12.3)"
 
 # ============================================================
 # TRANSLATIONS
@@ -736,6 +736,16 @@ function Convert-CodexReset {
     }
 }
 
+function Get-CodexWindowLabel {
+    param($Seconds)
+    if (-not $Seconds) { return "limit" }
+    if ($Seconds -eq $script:Window5h) { return "5h" }
+    if ($Seconds -eq $script:Window7d) { return "7d" }
+    if ($Seconds % 86400 -eq 0) { return "$($Seconds / 86400)d" }
+    if ($Seconds % 3600 -eq 0) { return "$($Seconds / 3600)h" }
+    return "limit"
+}
+
 function Update-Display {
     try {
         $usage = Get-Usage
@@ -783,27 +793,37 @@ function Update-Display {
         }
 
         if ($codexUsage -and $codexUsage.rate_limit.primary_window -and $null -ne $codexUsage.rate_limit.primary_window.used_percent) {
-            $cxFiveUsed = [double]$codexUsage.rate_limit.primary_window.used_percent
-            $cxWeekUsed = [double]$codexUsage.rate_limit.secondary_window.used_percent
-            $cxFiveLeft = [Math]::Round(100 - $cxFiveUsed, 1)
-            $cxWeekLeft = [Math]::Round(100 - $cxWeekUsed, 1)
-            $cxFiveReset = Convert-CodexReset $codexUsage.rate_limit.primary_window.reset_at
-            $cxWeekReset = Convert-CodexReset $codexUsage.rate_limit.secondary_window.reset_at
+            $primary = $codexUsage.rate_limit.primary_window
+            $cxPrimaryUsed = [double]$primary.used_percent
+            $cxPrimaryLeft = [Math]::Round(100 - $cxPrimaryUsed, 1)
+            $cxPrimaryReset = Convert-CodexReset $primary.reset_at
+            $cxPrimarySecs = if ($primary.limit_window_seconds) { [int]$primary.limit_window_seconds } else { 0 }
 
             $script:DisplayData["HasCodex"] = $true
             $script:DisplayData["CodexPlan"] = if ($codexUsage.plan_type) { $codexUsage.plan_type } else { "codex" }
-            $script:DisplayData["CodexFiveLeft"] = $cxFiveLeft
-            $script:DisplayData["CodexFiveUsed"] = $cxFiveUsed
-            $script:DisplayData["CodexFiveColor"] = Get-ColorTier $cxFiveLeft
-            $script:DisplayData["CodexFiveReset"] = $cxFiveReset
-            $script:DisplayData["CodexFivePace"] = Get-Pace $cxFiveUsed $cxFiveReset $script:Window5h
-            $script:DisplayData["CodexFiveBurnout"] = Get-Burnout $cxFiveUsed $cxFiveReset $script:Window5h
-            $script:DisplayData["CodexWeekLeft"] = $cxWeekLeft
-            $script:DisplayData["CodexWeekUsed"] = $cxWeekUsed
-            $script:DisplayData["CodexWeekColor"] = Get-ColorTier $cxWeekLeft
-            $script:DisplayData["CodexWeekReset"] = $cxWeekReset
-            $script:DisplayData["CodexWeekPace"] = Get-Pace $cxWeekUsed $cxWeekReset $script:Window7d
-            $script:DisplayData["CodexWeekBurnout"] = Get-Burnout $cxWeekUsed $cxWeekReset $script:Window7d
+            $script:DisplayData["CodexPrimaryLabel"] = Get-CodexWindowLabel $cxPrimarySecs
+            $script:DisplayData["CodexPrimarySecs"] = $cxPrimarySecs
+            $script:DisplayData["CodexPrimaryLeft"] = $cxPrimaryLeft
+            $script:DisplayData["CodexPrimaryColor"] = Get-ColorTier $cxPrimaryLeft
+            $script:DisplayData["CodexPrimaryReset"] = $cxPrimaryReset
+            $script:DisplayData["CodexPrimaryPace"] = if ($cxPrimarySecs) { Get-Pace $cxPrimaryUsed $cxPrimaryReset $cxPrimarySecs } else { $null }
+            $script:DisplayData["CodexPrimaryBurnout"] = if ($cxPrimarySecs) { Get-Burnout $cxPrimaryUsed $cxPrimaryReset $cxPrimarySecs } else { $null }
+
+            $secondary = $codexUsage.rate_limit.secondary_window
+            if ($secondary -and $null -ne $secondary.used_percent) {
+                $cxSecondaryUsed = [double]$secondary.used_percent
+                $cxSecondaryLeft = [Math]::Round(100 - $cxSecondaryUsed, 1)
+                $cxSecondaryReset = Convert-CodexReset $secondary.reset_at
+                $cxSecondarySecs = if ($secondary.limit_window_seconds) { [int]$secondary.limit_window_seconds } else { 0 }
+                $script:DisplayData["HasCodexSecondary"] = $true
+                $script:DisplayData["CodexSecondaryLabel"] = Get-CodexWindowLabel $cxSecondarySecs
+                $script:DisplayData["CodexSecondarySecs"] = $cxSecondarySecs
+                $script:DisplayData["CodexSecondaryLeft"] = $cxSecondaryLeft
+                $script:DisplayData["CodexSecondaryColor"] = Get-ColorTier $cxSecondaryLeft
+                $script:DisplayData["CodexSecondaryReset"] = $cxSecondaryReset
+                $script:DisplayData["CodexSecondaryPace"] = if ($cxSecondarySecs) { Get-Pace $cxSecondaryUsed $cxSecondaryReset $cxSecondarySecs } else { $null }
+                $script:DisplayData["CodexSecondaryBurnout"] = if ($cxSecondarySecs) { Get-Burnout $cxSecondaryUsed $cxSecondaryReset $cxSecondarySecs } else { $null }
+            }
         }
 
         if (-not $script:DisplayData.HasClaude -and -not $script:DisplayData.HasCodex) {
@@ -823,7 +843,11 @@ function Update-Display {
             $tips += "CC $([int]$script:DisplayData.FiveHrLeft)%/$([int]$script:DisplayData.SevenDayLeft)%"
         }
         if ($script:DisplayData.HasCodex) {
-            $tips += "CX $([int]$script:DisplayData.CodexFiveLeft)%/$([int]$script:DisplayData.CodexWeekLeft)%"
+            $tip = "CX $($script:DisplayData.CodexPrimaryLabel) $([int]$script:DisplayData.CodexPrimaryLeft)%"
+            if ($script:DisplayData.HasCodexSecondary) {
+                $tip += "/$($script:DisplayData.CodexSecondaryLabel) $([int]$script:DisplayData.CodexSecondaryLeft)%"
+            }
+            $tips += $tip
         }
         $tooltip = ($tips -join " | ")
         $script:NotifyIcon.Text = $tooltip
@@ -848,7 +872,10 @@ function Update-RotatingIcon {
 
     $phases = @()
     if ($script:DisplayData.HasClaude) { $phases += "cc5"; $phases += "cc7" }
-    if ($script:DisplayData.HasCodex) { $phases += "cx5"; $phases += "cxw" }
+    if ($script:DisplayData.HasCodex) {
+        $phases += "cx1"
+        if ($script:DisplayData.HasCodexSecondary) { $phases += "cx2" }
+    }
     if ($phases.Count -eq 0) { return }
 
     $phase = $phases[$script:IconPhase % $phases.Count]
@@ -861,13 +888,13 @@ function Update-RotatingIcon {
             $bmp = New-BarIcon -Percent ([int]$script:DisplayData.SevenDayLeft) -ColorTier $script:DisplayData.SevenColor
             $tip = "CC 7d $([int]$script:DisplayData.SevenDayLeft)% (bar)"
         }
-        "cx5" {
-            $bmp = New-DiamondIcon -Percent ([int]$script:DisplayData.CodexFiveLeft) -ColorTier $script:DisplayData.CodexFiveColor
-            $tip = "CX 5h $([int]$script:DisplayData.CodexFiveLeft)% (diamond)"
+        "cx1" {
+            $bmp = New-DiamondIcon -Percent ([int]$script:DisplayData.CodexPrimaryLeft) -ColorTier $script:DisplayData.CodexPrimaryColor
+            $tip = "CX $($script:DisplayData.CodexPrimaryLabel) $([int]$script:DisplayData.CodexPrimaryLeft)% (diamond)"
         }
         default {
-            $bmp = New-SquareIcon -Percent ([int]$script:DisplayData.CodexWeekLeft) -ColorTier $script:DisplayData.CodexWeekColor
-            $tip = "CX weekly $([int]$script:DisplayData.CodexWeekLeft)% (square)"
+            $bmp = New-SquareIcon -Percent ([int]$script:DisplayData.CodexSecondaryLeft) -ColorTier $script:DisplayData.CodexSecondaryColor
+            $tip = "CX $($script:DisplayData.CodexSecondaryLabel) $([int]$script:DisplayData.CodexSecondaryLeft)% (square)"
         }
     }
 
@@ -936,7 +963,7 @@ function Update-ContextMenu {
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
     $menu.RenderMode = [System.Windows.Forms.ToolStripRenderMode]::System
 
-    $header = $menu.Items.Add("Claude Code Monitor")
+    $header = $menu.Items.Add("Claude + Codex Monitor")
     $header.Enabled = $false
     $header.Font = $script:FontBold
     $menu.Items.Add("-") | Out-Null
@@ -971,13 +998,14 @@ function Update-ContextMenu {
             $cxHeader = $menu.Items.Add("Codex ($($Data.CodexPlan))")
             $cxHeader.Enabled = $false
 
-            Add-SectionToMenu $menu "Codex 5h" $Data.CodexFiveLeft $Data.CodexFiveColor `
-                $Data.CodexFiveReset $Data.CodexFivePace $Data.CodexFiveBurnout $script:Window5h "[diamond]"
+            Add-SectionToMenu $menu "Codex $($Data.CodexPrimaryLabel)" $Data.CodexPrimaryLeft $Data.CodexPrimaryColor `
+                $Data.CodexPrimaryReset $Data.CodexPrimaryPace $Data.CodexPrimaryBurnout $Data.CodexPrimarySecs "[diamond]"
 
-            $menu.Items.Add("-") | Out-Null
-
-            Add-SectionToMenu $menu "Codex Weekly" $Data.CodexWeekLeft $Data.CodexWeekColor `
-                $Data.CodexWeekReset $Data.CodexWeekPace $Data.CodexWeekBurnout $script:Window7d "[square]"
+            if ($Data.HasCodexSecondary) {
+                $menu.Items.Add("-") | Out-Null
+                Add-SectionToMenu $menu "Codex $($Data.CodexSecondaryLabel)" $Data.CodexSecondaryLeft $Data.CodexSecondaryColor `
+                    $Data.CodexSecondaryReset $Data.CodexSecondaryPace $Data.CodexSecondaryBurnout $Data.CodexSecondarySecs "[square]"
+            }
 
             $menu.Items.Add("-") | Out-Null
             $cxSrcItem = $menu.Items.Add("$($script:L.Source): Codex $($script:CodexFetchStatus)")
@@ -1119,8 +1147,8 @@ $mutexName = "ClaudeCodeMonitor_SingleInstance"
 $script:Mutex = New-Object System.Threading.Mutex($false, $mutexName)
 if (-not $script:Mutex.WaitOne(0, $false)) {
     [System.Windows.Forms.MessageBox]::Show(
-        "Claude Code Monitor is already running.`nCheck your system tray.",
-        "Claude Code Monitor",
+        "Claude + Codex Monitor is already running.`nCheck your system tray.",
+        "Claude + Codex Monitor",
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Information
     )
@@ -1129,7 +1157,7 @@ if (-not $script:Mutex.WaitOne(0, $false)) {
 
 # Create NotifyIcon
 $script:NotifyIcon = New-Object System.Windows.Forms.NotifyIcon
-$script:NotifyIcon.Text = "Claude Code Monitor - Loading..."
+$script:NotifyIcon.Text = "Claude + Codex Monitor - Loading..."
 $bmp = New-DonutIcon -Percent 0 -ColorTier "green"
 Set-TrayIconFromBitmap $bmp
 $script:NotifyIcon.Visible = $true

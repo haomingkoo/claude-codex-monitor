@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# <xbar.title>Claude Code Usage</xbar.title>
-# <xbar.version>v12.2</xbar.version>
+# <xbar.title>Claude + Codex Usage</xbar.title>
+# <xbar.version>v12.3</xbar.version>
 # <xbar.author>koohaoming</xbar.author>
-# <xbar.desc>Menu-bar usage for Claude Code and OpenAI Codex — rotates between providers; shows 5h, weekly, per-model sub-limits, and credits. Works with either or both.</xbar.desc>
+# <xbar.desc>Menu-bar usage for Claude Code and OpenAI Codex — rotates between providers; shows reported usage windows, per-model sub-limits, and credits. Works with either or both.</xbar.desc>
 
 # ============================================================
 # CONFIG
@@ -398,6 +398,25 @@ fi
 
 # Remaining-percent helper (used by both Claude and Codex)
 calc_remaining() { echo "scale=1; 100 - $1" | bc; }
+
+format_window_label() {
+  local seconds="$1"
+  case "$seconds" in
+    18000) echo "5h" ;;
+    604800) echo "7d" ;;
+    '') echo "limit" ;;
+    *[!0-9]*) echo "limit" ;;
+    *)
+      if [ $((seconds % 86400)) -eq 0 ]; then
+        echo "$((seconds / 86400))d"
+      elif [ $((seconds % 3600)) -eq 0 ]; then
+        echo "$((seconds / 3600))h"
+      else
+        echo "limit"
+      fi
+      ;;
+  esac
+}
 
 # ----- Claude usage (only when logged in) -----
 if [ "$CLAUDE_OK" = true ]; then
@@ -1040,21 +1059,27 @@ if [ "$HAS_CODEX" = true ]; then
   fi
 
   if [ "$CODEX_OK" = true ]; then
-    cx_5h_used=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.primary_window.used_percent // empty')
-    cx_5h_reset=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.primary_window.reset_at // empty')
-    cx_wk_used=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.secondary_window.used_percent // empty')
-    cx_wk_reset=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.secondary_window.reset_at // empty')
+    cx_primary_used=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.primary_window.used_percent // empty')
+    cx_primary_reset=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.primary_window.reset_at // empty')
+    cx_primary_secs=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.primary_window.limit_window_seconds // empty')
+    cx_secondary_used=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.secondary_window.used_percent // empty')
+    cx_secondary_reset=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.secondary_window.reset_at // empty')
+    cx_secondary_secs=$(echo "$CODEX_USAGE" | $JQ -r '.rate_limit.secondary_window.limit_window_seconds // empty')
     cx_plan=$(echo "$CODEX_USAGE" | $JQ -r '.plan_type // "codex"')
     cx_credits_has=$(echo "$CODEX_USAGE" | $JQ -r '.credits.has_credits // empty')
     cx_credits_bal=$(echo "$CODEX_USAGE" | $JQ -r '.credits.balance // empty')
     cx_credits_unlimited=$(echo "$CODEX_USAGE" | $JQ -r '.credits.unlimited // empty')
-    if [ -z "$cx_5h_used" ]; then
+    if [ -z "$cx_primary_used" ]; then
       CODEX_OK=false  # unexpected shape
       log "WARN" "Codex usage JSON missing rate_limit fields"
     else
       # epoch reset_at -> ISO so render_section's time helpers work
-      cx_5h_iso=$(date -u -r "${cx_5h_reset:-0}" "+%Y-%m-%dT%H:%M:%S+00:00" 2>/dev/null)
-      cx_wk_iso=$(date -u -r "${cx_wk_reset:-0}" "+%Y-%m-%dT%H:%M:%S+00:00" 2>/dev/null)
+      cx_primary_label=$(format_window_label "$cx_primary_secs")
+      cx_primary_iso=$(date -u -r "${cx_primary_reset:-0}" "+%Y-%m-%dT%H:%M:%S+00:00" 2>/dev/null)
+      if [ -n "$cx_secondary_used" ]; then
+        cx_secondary_label=$(format_window_label "$cx_secondary_secs")
+        cx_secondary_iso=$(date -u -r "${cx_secondary_reset:-0}" "+%Y-%m-%dT%H:%M:%S+00:00" 2>/dev/null)
+      fi
     fi
   fi
 fi
@@ -1081,8 +1106,10 @@ fi
 
 # --- Codex menu-bar bits ---
 if [ "$CODEX_OK" = true ]; then
-  cx_5h_left=$(calc_remaining "${cx_5h_used:-0}"); cx_5h_left_int=${cx_5h_left%.*}
-  cx_wk_left=$(calc_remaining "${cx_wk_used:-0}"); cx_wk_left_int=${cx_wk_left%.*}
+  cx_primary_left=$(calc_remaining "${cx_primary_used:-0}"); cx_primary_left_int=${cx_primary_left%.*}
+  if [ -n "$cx_secondary_used" ]; then
+    cx_secondary_left=$(calc_remaining "$cx_secondary_used"); cx_secondary_left_int=${cx_secondary_left%.*}
+  fi
 fi
 
 # --- Menu bar: one line per available provider; SwiftBar rotates them ---
@@ -1097,10 +1124,12 @@ if [ "$CLAUDE_OK" = true ]; then
   bar_emitted=1
 fi
 if [ "$CODEX_OK" = true ]; then
-  cx_min=$cx_5h_left_int
-  [ "$cx_wk_left_int" -lt "$cx_min" ] 2>/dev/null && cx_min=$cx_wk_left_int
+  cx_min=$cx_primary_left_int
+  [ -n "$cx_secondary_left_int" ] && [ "$cx_secondary_left_int" -lt "$cx_min" ] 2>/dev/null && cx_min=$cx_secondary_left_int
   cxi=$(status_icon "$cx_min")
-  echo "${cxi} CX 5h:${cx_5h_left_int}%·wk:${cx_wk_left_int}% | size=13"
+  cx_bar="${cxi} CX ${cx_primary_label}:${cx_primary_left_int}%"
+  [ -n "$cx_secondary_left_int" ] && cx_bar="${cx_bar}·${cx_secondary_label}:${cx_secondary_left_int}%"
+  echo "${cx_bar} | size=13"
   bar_emitted=1
 fi
 if [ "$bar_emitted" = 0 ]; then
@@ -1210,13 +1239,15 @@ if [ "$CODEX_OK" = true ]; then
   [ "$CLAUDE_OK" = true ] && echo "---"  # separator only when a Claude section precedes
   echo "Codex (${cx_plan}) | size=$S $(c "$TEXT_PRIMARY") bash='true' terminal=false"
   echo "---"
-  render_section "Codex 5h" "$cx_5h_left" "$(color_for_remaining "$cx_5h_left")" "$cx_5h_iso" "18000" "$cx_5h_used" "true"
-  echo "---"
-  render_section "Codex Weekly" "$cx_wk_left" "$(color_for_remaining "$cx_wk_left")" "$cx_wk_iso" "604800" "$cx_wk_used" "true"
+  render_section "Codex ${cx_primary_label}" "$cx_primary_left" "$(color_for_remaining "$cx_primary_left")" "$cx_primary_iso" "$cx_primary_secs" "$cx_primary_used" "true"
+  if [ -n "$cx_secondary_used" ]; then
+    echo "---"
+    render_section "Codex ${cx_secondary_label}" "$cx_secondary_left" "$(color_for_remaining "$cx_secondary_left")" "$cx_secondary_iso" "$cx_secondary_secs" "$cx_secondary_used" "true"
+  fi
   NOP="bash='true' terminal=false"
   if [ "$cx_credits_unlimited" = "true" ]; then
     echo "💳  Codex credits: unlimited | size=$S $(c "$TEXT_SECONDARY") $NOP"
-  elif [ -n "$cx_credits_bal" ] && [ "$cx_credits_bal" != "null" ]; then
+  elif [ "$cx_credits_has" = "true" ] && [ -n "$cx_credits_bal" ] && [ "$cx_credits_bal" != "null" ]; then
     echo "💳  Codex credits: ${cx_credits_bal} | size=$S $(c "$TEXT_SECONDARY") $NOP"
   fi
   echo "---"

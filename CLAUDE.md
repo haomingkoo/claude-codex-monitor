@@ -8,10 +8,10 @@ optional phone push alerts. macOS via SwiftBar, Windows via system tray.
 ## Tech Stack
 - **macOS**: Bash (`claude-code-monitor.2m.sh`), runs as a [SwiftBar](https://github.com/swiftbar/SwiftBar) plugin. Deps: `jq`, `python3`, `curl`, `osascript`.
 - **Windows**: PowerShell (`windows/claude-code-monitor.ps1`), launched via `.bat`/`.vbs`, PowerShell 5.1+.
-- No package manager, build step, or test suite — this is a pair of standalone scripts, not a compiled app.
+- No package manager or build step — this is a pair of standalone scripts, not a compiled app.
 
 ## Commands
-There is no install/build/test tooling. To run manually:
+There is no install or build tooling. To run manually:
 ```bash
 # macOS — run the plugin directly (mirrors what SwiftBar does every 2 min)
 ./claude-code-monitor.2m.sh
@@ -26,7 +26,7 @@ open -a SwiftBar
 # Windows — launch the tray monitor
 .\windows\launch-monitor.bat
 ```
-No test files exist in this repo.
+Run the focused shell check with `bash tests/codex-window-labels.sh`.
 
 ## Architecture
 `claude-code-monitor.2m.sh` is a single-file script, organized top-to-bottom into

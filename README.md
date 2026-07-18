@@ -1,4 +1,4 @@
-# Claude Code Monitor
+# Claude + Codex Monitor
 
 Know exactly how much Claude Code (and now OpenAI Codex) you have left — right from your menu bar.
 
@@ -14,7 +14,7 @@ A lightweight widget that tracks your **remaining** rate limits in real time, te
 
 ```
   🟢 CC 52%·7d:81%                     <- menu bar rotates
-  🟢 CX 5h:74%·wk:68%
+  🟢 CX 7d:68%
 
   Claude Code (max)
   ---------------------------------
@@ -43,12 +43,7 @@ A lightweight widget that tracks your **remaining** rate limits in real time, te
   ---------------------------------
   Codex (plus)
   ---------------------------------
-  Codex 5h
-  |||||||||||||||.....
-  74.0% remaining
-  Refills in 2h 10m (2:28 PM)
-  ---------------------------------
-  Codex Weekly
+  Codex 7d
   ||||||||||||||......
   68.0% remaining
   Refills in 3d 8h (Jun 30 6:00 PM)
@@ -64,9 +59,9 @@ A lightweight widget that tracks your **remaining** rate limits in real time, te
   📱 Phone Alerts (ntfy)            >
 ```
 
-Per-model rows (Sonnet, Opus) show up only when your plan reports them. The Extra Usage row shows your pay-as-you-go spend against its cap, or "off" when you have no extra-usage credits enabled.
+Codex rows follow the windows your plan currently reports, so a weekly-only plan shows one `7d` row instead of a mislabeled `5h` row. Per-model rows (Sonnet, Opus) show up only when your Claude plan reports them. The Extra Usage row shows your pay-as-you-go spend against its cap, or "off" when you have no extra-usage credits enabled.
 
-**Windows (System Tray)** — tray icons rotate by provider/window: CC 5h is a donut, CC 7d is a bar, CX 5h is a diamond, and CX weekly is a square. Click for the full dropdown:
+**Windows (System Tray)** — tray icons rotate by provider/window: CC 5h is a donut, CC 7d is a bar, and Codex's reported windows use a diamond and square. Click for the full dropdown:
 
 ```
   Claude Code (max)
@@ -87,12 +82,7 @@ Per-model rows (Sonnet, Opus) show up only when your plan reports them. The Extr
   ---------------------------------
   Codex (plus)
   ---------------------------------
-  Codex 5h  [diamond icon]
-  |||||||||||||||.....
-  74% remaining
-  Refills in 2h 10m (2:28 PM)
-  ---------------------------------
-  Codex Weekly  [square icon]
+  Codex 7d  [diamond icon]
   ||||||||||||||......
   68% remaining
   Refills in 3d 8h (Jun 30 6:00 PM)
@@ -109,7 +99,7 @@ At a glance: 🟢 >50% left · 🟡 20–50% left · 🔴 <20% left
 
 **Two tools, one menu bar** — tracks Claude Code and OpenAI Codex. The bar rotates between them, the dropdown lists both, and it works with whichever you're signed into. No Codex? It behaves exactly like the Claude-only version. No Claude? It shows just Codex.
 
-**See what's left** — for Claude: 5-hour session, 7-day window, per-model sub-limits (Sonnet and Opus, when your plan reports them), and your pay-as-you-go Extra Usage balance. For Codex: 5-hour and weekly limits, plus credits when reported.
+**See what's left** — for Claude: 5-hour session, 7-day window, per-model sub-limits (Sonnet and Opus, when your plan reports them), and your pay-as-you-go Extra Usage balance. For Codex: whichever rate-limit windows the API reports, plus credits when reported.
 
 **Know when it resets** — countdown timer + local time, e.g., "Refills in 1h 49m (4:00 PM)". No timezone math needed.
 
@@ -316,6 +306,7 @@ If your Codex token has expired, the monitor can refresh it with the refresh tok
 
 | Version | What changed |
 |---------|-------------|
+| **v12.3** | Codex window labels now follow the API-reported duration, missing secondary windows are no longer rendered, and disabled credits no longer appear as a zero balance. |
 | **v12.2** | Windows Codex support: tray works with Claude only, Codex only, or both. Shapes distinguish providers/windows: CC donut/bar, CX diamond/square. |
 | **v12.1** | Reliability/performance cleanup: SwiftBar cache TTL now tolerates scheduler jitter, reset timestamps are parsed once per section with native macOS tools first, Windows stale-cache fallback updates cache mtime, and repo/docs file modes are cleaned up. |
 | **v12.0** | OpenAI Codex support (macOS): menu bar rotates between Claude and Codex, dropdown shows both, works with either or both. Per-model rows now appear only when actually used. |
